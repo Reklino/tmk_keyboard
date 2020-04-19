@@ -1,0 +1,3907 @@
+   1               		.file	"matrix.c"
+   2               	__SP_H__ = 0x3e
+   3               	__SP_L__ = 0x3d
+   4               	__SREG__ = 0x3f
+   5               	__tmp_reg__ = 0
+   6               	__zero_reg__ = 1
+   7               		.text
+   8               	.Ltext0:
+   9               		.cfi_sections	.debug_frame
+  10               		.section	.text.register_key,"ax",@progbits
+  12               	register_key:
+  13               	.LVL0:
+  14               	.LFB13:
+  15               		.file 1 "matrix.c"
+   1:matrix.c      **** /*
+   2:matrix.c      **** Copyright 2011 Jun Wako <wakojun@gmail.com>
+   3:matrix.c      **** 
+   4:matrix.c      **** This program is free software: you can redistribute it and/or modify
+   5:matrix.c      **** it under the terms of the GNU General Public License as published by
+   6:matrix.c      **** the Free Software Foundation, either version 2 of the License, or
+   7:matrix.c      **** (at your option) any later version.
+   8:matrix.c      **** 
+   9:matrix.c      **** This program is distributed in the hope that it will be useful,
+  10:matrix.c      **** but WITHOUT ANY WARRANTY; without even the implied warranty of
+  11:matrix.c      **** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  12:matrix.c      **** GNU General Public License for more details.
+  13:matrix.c      **** 
+  14:matrix.c      **** You should have received a copy of the GNU General Public License
+  15:matrix.c      **** along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  16:matrix.c      **** */
+  17:matrix.c      **** 
+  18:matrix.c      **** /*
+  19:matrix.c      ****  * scan matrix
+  20:matrix.c      ****  */
+  21:matrix.c      **** #include <stdint.h>
+  22:matrix.c      **** #include <stdbool.h>
+  23:matrix.c      **** #include <avr/io.h>
+  24:matrix.c      **** #include "print.h"
+  25:matrix.c      **** #include "util.h"
+  26:matrix.c      **** #include "debug.h"
+  27:matrix.c      **** #include "adb.h"
+  28:matrix.c      **** #include "matrix.h"
+  29:matrix.c      **** #include "report.h"
+  30:matrix.c      **** #include "host.h"
+  31:matrix.c      **** #include "led.h"
+  32:matrix.c      **** #include "timer.h"
+  33:matrix.c      **** #include "wait.h"
+  34:matrix.c      **** 
+  35:matrix.c      **** 
+  36:matrix.c      **** 
+  37:matrix.c      **** 
+  38:matrix.c      **** static bool has_media_keys = false;
+  39:matrix.c      **** static bool is_iso_layout = false;
+  40:matrix.c      **** 
+  41:matrix.c      **** #if ADB_MOUSE_ENABLE
+  42:matrix.c      **** #define dmprintf(fmt, ...)  do { if (debug_mouse) xprintf(fmt, ##__VA_ARGS__); } while (0)
+  43:matrix.c      **** static uint16_t mouse_cpi = 100;
+  44:matrix.c      **** static void mouse_init(uint8_t addr);
+  45:matrix.c      **** #endif
+  46:matrix.c      **** 
+  47:matrix.c      **** // matrix state buffer(1:on, 0:off)
+  48:matrix.c      **** static matrix_row_t matrix[MATRIX_ROWS];
+  49:matrix.c      **** 
+  50:matrix.c      **** static void register_key(uint8_t key);
+  51:matrix.c      **** 
+  52:matrix.c      **** static void device_scan(void)
+  53:matrix.c      **** {
+  54:matrix.c      ****     xprintf("\nScan:\n");
+  55:matrix.c      ****     for (uint8_t addr = 0; addr < 16; addr++) {
+  56:matrix.c      ****         uint16_t reg3 = adb_host_talk(addr, ADB_REG_3);
+  57:matrix.c      ****         if (reg3) {
+  58:matrix.c      ****             xprintf(" addr:%d, reg3:%04X\n", addr, reg3);
+  59:matrix.c      ****         }
+  60:matrix.c      ****     }
+  61:matrix.c      **** }
+  62:matrix.c      **** 
+  63:matrix.c      **** void matrix_init(void)
+  64:matrix.c      **** {
+  65:matrix.c      ****     debug_enable = true;
+  66:matrix.c      ****     //debug_matrix = true;
+  67:matrix.c      ****     //debug_keyboard = true;
+  68:matrix.c      ****     //debug_mouse = true;
+  69:matrix.c      **** 
+  70:matrix.c      ****     // LED on
+  71:matrix.c      ****     DDRD |= (1<<6); PORTD |= (1<<6);
+  72:matrix.c      **** 
+  73:matrix.c      ****     adb_host_init();
+  74:matrix.c      **** 
+  75:matrix.c      ****     // wait for line and device to be stable
+  76:matrix.c      ****     wait_ms(100);
+  77:matrix.c      **** 
+  78:matrix.c      ****     device_scan();
+  79:matrix.c      **** 
+  80:matrix.c      ****     //
+  81:matrix.c      ****     // Keyboard
+  82:matrix.c      ****     //
+  83:matrix.c      ****     xprintf("\nKeyboard:\n");
+  84:matrix.c      ****     // Determine ISO keyboard by handler id
+  85:matrix.c      ****     // http://lxr.free-electrons.com/source/drivers/macintosh/adbhid.c?v=4.4#L815
+  86:matrix.c      ****     uint8_t handler_id = (uint8_t) adb_host_talk(ADB_ADDR_KEYBOARD, ADB_REG_3);
+  87:matrix.c      ****     switch (handler_id) {
+  88:matrix.c      ****     case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
+  89:matrix.c      ****     case 0x11: case 0x14: case 0x19: case 0x1D: case 0xC1:
+  90:matrix.c      ****     case 0xC4: case 0xC7:
+  91:matrix.c      ****         is_iso_layout = true;
+  92:matrix.c      ****         break;
+  93:matrix.c      ****     default:
+  94:matrix.c      ****         is_iso_layout = false;
+  95:matrix.c      ****         break;
+  96:matrix.c      ****     }
+  97:matrix.c      ****     xprintf("hadler: %02X, ISO: %s\n", handler_id, (is_iso_layout ? "yes" : "no"));
+  98:matrix.c      **** 
+  99:matrix.c      ****     // Adjustable keyboard media keys: address=0x07 and handlerID=0x02
+ 100:matrix.c      ****     has_media_keys = (0x02 == (adb_host_talk(ADB_ADDR_APPLIANCE, ADB_REG_3) & 0xff));
+ 101:matrix.c      ****     if (has_media_keys) {
+ 102:matrix.c      ****         xprintf("Media keys\n");
+ 103:matrix.c      ****     }
+ 104:matrix.c      **** 
+ 105:matrix.c      ****     // Enable keyboard left/right modifier distinction
+ 106:matrix.c      ****     // Listen Register3
+ 107:matrix.c      ****     //  upper byte: reserved bits 0000, keyboard address 0010
+ 108:matrix.c      ****     //  lower byte: device handler 00000011
+ 109:matrix.c      ****     adb_host_listen(ADB_ADDR_KEYBOARD, ADB_REG_3, ADB_ADDR_KEYBOARD, ADB_HANDLER_EXTENDED_KEYBOARD)
+ 110:matrix.c      **** 
+ 111:matrix.c      **** 
+ 112:matrix.c      ****     //
+ 113:matrix.c      ****     // Mouse
+ 114:matrix.c      ****     //
+ 115:matrix.c      ****     // https://developer.apple.com/library/archive/technotes/hw/hw_01.html#Extended
+ 116:matrix.c      ****     #ifdef ADB_MOUSE_ENABLE
+ 117:matrix.c      ****     xprintf("\nMouse:\n");
+ 118:matrix.c      **** 
+ 119:matrix.c      ****     // Check device on addr3
+ 120:matrix.c      ****     mouse_init(ADB_ADDR_MOUSE);
+ 121:matrix.c      ****     #endif
+ 122:matrix.c      **** 
+ 123:matrix.c      ****     device_scan();
+ 124:matrix.c      **** 
+ 125:matrix.c      ****     // initialize matrix state: all keys off
+ 126:matrix.c      ****     for (uint8_t i=0; i < MATRIX_ROWS; i++) matrix[i] = 0x00;
+ 127:matrix.c      **** 
+ 128:matrix.c      ****     led_set(host_keyboard_leds());
+ 129:matrix.c      **** 
+ 130:matrix.c      ****     // LED off
+ 131:matrix.c      ****     DDRD |= (1<<6); PORTD &= ~(1<<6);
+ 132:matrix.c      ****     return;
+ 133:matrix.c      **** }
+ 134:matrix.c      **** 
+ 135:matrix.c      **** #ifdef ADB_MOUSE_ENABLE
+ 136:matrix.c      **** static void mouse_init(uint8_t orig_addr)
+ 137:matrix.c      **** {
+ 138:matrix.c      ****     uint16_t reg3;
+ 139:matrix.c      ****     uint8_t mouse_handler;
+ 140:matrix.c      ****     uint8_t addr;
+ 141:matrix.c      **** 
+ 142:matrix.c      **** again:
+ 143:matrix.c      ****     mouse_handler = (reg3  = adb_host_talk(orig_addr, ADB_REG_3)) & 0xFF;
+ 144:matrix.c      ****     if (!reg3) return;
+ 145:matrix.c      ****     dmprintf("addr%d reg3: %02X\n", orig_addr, reg3);
+ 146:matrix.c      **** 
+ 147:matrix.c      ****     // Move device to tmp address
+ 148:matrix.c      ****     adb_host_flush(orig_addr);
+ 149:matrix.c      ****     adb_host_listen(orig_addr, ADB_REG_3, ((reg3 >> 8) & 0xF0) | ADB_ADDR_TMP, 0xFE);
+ 150:matrix.c      ****     adb_host_flush(ADB_ADDR_TMP);
+ 151:matrix.c      **** 
+ 152:matrix.c      ****     mouse_handler = (reg3  = adb_host_talk(ADB_ADDR_TMP, ADB_REG_3)) & 0xFF;
+ 153:matrix.c      ****     if (!reg3) {
+ 154:matrix.c      ****         dmprintf("move fail\n");
+ 155:matrix.c      ****         goto again;
+ 156:matrix.c      ****     }
+ 157:matrix.c      ****     addr = ADB_ADDR_TMP;
+ 158:matrix.c      ****     dmprintf("addr%d reg3: %02X\n", addr, reg3);
+ 159:matrix.c      **** 
+ 160:matrix.c      **** 
+ 161:matrix.c      **** detect_again:
+ 162:matrix.c      ****     if (mouse_handler == ADB_HANDLER_CLASSIC1_MOUSE || mouse_handler == ADB_HANDLER_CLASSIC2_MOUSE)
+ 163:matrix.c      ****         adb_host_flush(addr);
+ 164:matrix.c      ****         adb_host_listen(addr, ADB_REG_3, (reg3 >> 8), ADB_HANDLER_EXTENDED_MOUSE);
+ 165:matrix.c      **** 
+ 166:matrix.c      ****         mouse_handler = (reg3  = adb_host_talk(addr, ADB_REG_3)) & 0xFF;
+ 167:matrix.c      **** 
+ 168:matrix.c      **** 
+ 169:matrix.c      ****         if (mouse_handler == ADB_HANDLER_CLASSIC1_MOUSE) {
+ 170:matrix.c      ****             adb_host_flush(addr);
+ 171:matrix.c      ****             adb_host_listen(addr, ADB_REG_3, (reg3 >> 8), ADB_HANDLER_CLASSIC2_MOUSE);
+ 172:matrix.c      **** 
+ 173:matrix.c      ****             mouse_handler = (reg3  = adb_host_talk(addr, ADB_REG_3)) & 0xFF;
+ 174:matrix.c      ****         }
+ 175:matrix.c      **** 
+ 176:matrix.c      ****         if (mouse_handler == ADB_HANDLER_CLASSIC1_MOUSE) {
+ 177:matrix.c      ****             xprintf("Classic 100cpi\n");
+ 178:matrix.c      ****             mouse_cpi = 100;
+ 179:matrix.c      ****         }
+ 180:matrix.c      ****         if (mouse_handler == ADB_HANDLER_CLASSIC2_MOUSE) {
+ 181:matrix.c      ****             xprintf("Classic 200cpi\n");
+ 182:matrix.c      ****             mouse_cpi = 200;
+ 183:matrix.c      ****         }
+ 184:matrix.c      ****     }
+ 185:matrix.c      **** 
+ 186:matrix.c      ****     // Extended Mouse Protocol
+ 187:matrix.c      ****     if (mouse_handler == ADB_HANDLER_EXTENDED_MOUSE) {
+ 188:matrix.c      ****         // Device info format(reg1 8-byte data)
+ 189:matrix.c      ****         // 0-3: device id
+ 190:matrix.c      ****         // 4-5: resolution in units/inch (0xC8=200upi)
+ 191:matrix.c      ****         // 6  : device class      (0: Tablet, 1: Mouse, 2: Trackball)
+ 192:matrix.c      ****         // 7  : num of buttons
+ 193:matrix.c      ****         uint8_t len;
+ 194:matrix.c      ****         uint8_t buf[8];
+ 195:matrix.c      ****         len = adb_host_talk_buf(addr, ADB_REG_1, buf, sizeof(buf));
+ 196:matrix.c      **** 
+ 197:matrix.c      ****         if (len > 5) {
+ 198:matrix.c      ****             mouse_cpi = (buf[4]<<8) | buf[5];
+ 199:matrix.c      ****         } else {
+ 200:matrix.c      ****             mouse_cpi = 100;
+ 201:matrix.c      ****         }
+ 202:matrix.c      **** 
+ 203:matrix.c      ****         if (len) {
+ 204:matrix.c      ****             xprintf("Ext: [", len);
+ 205:matrix.c      ****             for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 206:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 207:matrix.c      ****         }
+ 208:matrix.c      **** 
+ 209:matrix.c      **** 
+ 210:matrix.c      ****         // Kensington Turbo Mouse 5: default device
+ 211:matrix.c      ****         if (buf[0] == 0x4B && buf[1] == 0x4D && buf[2] == 0x4C && buf[3] == 0x31) {
+ 212:matrix.c      ****             xprintf("TM5: default\n");
+ 213:matrix.c      ****             // Move it to addr0 to remove this device and get new device with handle id 50 on addr 
+ 214:matrix.c      ****             // and the new device on address 3 should be handled with command sequence later.
+ 215:matrix.c      ****             //
+ 216:matrix.c      ****             // Turbo Mouse 5 has one default device on addr3 as normal mouse at first, and another 
+ 217:matrix.c      ****             // with hander id 50 appears after the default device is moved from addr3.
+ 218:matrix.c      ****             // The mouse has the two devices at same time transiently in the result. The default de
+ 219:matrix.c      ****             // removed automatically after the another device receives command sequence.
+ 220:matrix.c      ****             // NOTE: The mouse hangs if you try moving the two deivces to same address.
+ 221:matrix.c      ****             adb_host_flush(addr);
+ 222:matrix.c      ****             adb_host_listen(addr, ADB_REG_3, ((reg3 >> 8) & 0xF0) | ADB_ADDR_0, 0xFE);
+ 223:matrix.c      ****         } else {
+ 224:matrix.c      ****             xprintf("Unknown\n");
+ 225:matrix.c      ****         }
+ 226:matrix.c      ****     }
+ 227:matrix.c      **** 
+ 228:matrix.c      ****     if (mouse_handler == ADB_HANDLER_TURBO_MOUSE) {
+ 229:matrix.c      ****         xprintf("TM5: ext\n");
+ 230:matrix.c      **** 
+ 231:matrix.c      ****         // Kensington Turbo Mouse 5 command sequence to enable four buttons
+ 232:matrix.c      ****         // https://elixir.bootlin.com/linux/v4.4/source/drivers/macintosh/adbhid.c#L1176
+ 233:matrix.c      ****         // https://github.com/NetBSD/src/blob/64b8a48e1288eb3902ed73113d157af50b2ec596/sys/arch/mac
+ 234:matrix.c      ****         static uint8_t cmd1[] = { 0xE7, 0x8C, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x94 };
+ 235:matrix.c      ****         static uint8_t cmd2[] = { 0xA5, 0x14, 0x00, 0x00, 0x69, 0xFF, 0xFF, 0x27 };
+ 236:matrix.c      **** 
+ 237:matrix.c      ****         adb_host_flush(addr);
+ 238:matrix.c      ****         adb_host_listen_buf(addr, ADB_REG_2, cmd1, sizeof(cmd1));
+ 239:matrix.c      ****         adb_host_flush(addr);
+ 240:matrix.c      ****         adb_host_listen_buf(addr, ADB_REG_2, cmd2, sizeof(cmd2));
+ 241:matrix.c      ****     }
+ 242:matrix.c      **** 
+ 243:matrix.c      **** 
+ 244:matrix.c      ****     // Move all mouses to a address after init to be polled
+ 245:matrix.c      ****     adb_host_flush(addr);
+ 246:matrix.c      ****     adb_host_listen(addr, ADB_REG_3, ((reg3 >> 8) & 0xF0) | ADB_ADDR_MOUSE_POLL, 0xFE);
+ 247:matrix.c      ****     adb_host_flush(ADB_ADDR_MOUSE_POLL);
+ 248:matrix.c      **** 
+ 249:matrix.c      ****     mouse_handler = (reg3  = adb_host_talk(addr, ADB_REG_3)) & 0xFF;
+ 250:matrix.c      ****     if (reg3) {
+ 251:matrix.c      ****         dmprintf("detect again\n");
+ 252:matrix.c      ****         goto detect_again;
+ 253:matrix.c      ****     }
+ 254:matrix.c      **** 
+ 255:matrix.c      ****     goto again;
+ 256:matrix.c      **** 
+ 257:matrix.c      **** //    dmprintf("handler: %d\n", mouse_handler);
+ 258:matrix.c      **** //    dmprintf("cpi: %d\n", mouse_cpi);
+ 259:matrix.c      **** }
+ 260:matrix.c      **** 
+ 261:matrix.c      **** #ifdef MAX
+ 262:matrix.c      **** #undef MAX
+ 263:matrix.c      **** #endif
+ 264:matrix.c      **** #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
+ 265:matrix.c      **** 
+ 266:matrix.c      **** static report_mouse_t mouse_report = {};
+ 267:matrix.c      **** 
+ 268:matrix.c      **** void adb_mouse_task(void)
+ 269:matrix.c      **** {
+ 270:matrix.c      ****     uint8_t len;
+ 271:matrix.c      ****     uint8_t buf[5];
+ 272:matrix.c      ****     int16_t x, y;
+ 273:matrix.c      ****     static int8_t mouseacc;
+ 274:matrix.c      **** 
+ 275:matrix.c      ****     /* tick of last polling */
+ 276:matrix.c      ****     static uint16_t tick_ms;
+ 277:matrix.c      **** 
+ 278:matrix.c      ****     // polling with 12ms interval
+ 279:matrix.c      ****     if (timer_elapsed(tick_ms) < 12) return;
+ 280:matrix.c      ****     tick_ms = timer_read();
+ 281:matrix.c      **** 
+ 282:matrix.c      ****     static uint16_t detect_ms;
+ 283:matrix.c      ****     if (timer_elapsed(detect_ms) > 1000) {
+ 284:matrix.c      ****         detect_ms = timer_read();
+ 285:matrix.c      ****         // check new device on addr3
+ 286:matrix.c      ****         mouse_init(ADB_ADDR_MOUSE);
+ 287:matrix.c      ****     }
+ 288:matrix.c      **** 
+ 289:matrix.c      ****     // Extended Mouse Protocol data can be 2-5 bytes
+ 290:matrix.c      ****     // https://developer.apple.com/library/archive/technotes/hw/hw_01.html#Extended
+ 291:matrix.c      ****     //
+ 292:matrix.c      ****     //   Byte 0: b00 y06 y05 y04 y03 y02 y01 y00
+ 293:matrix.c      ****     //   Byte 1: b01 x06 x05 x04 x03 x02 x01 x00
+ 294:matrix.c      ****     //   Byte 2: b02 y09 y08 y07 b03 x09 x08 x07
+ 295:matrix.c      ****     //   Byte 3: b04 y12 y11 y10 b05 x12 x11 x10
+ 296:matrix.c      ****     //   Byte 4: b06 y15 y14 y13 b07 x15 x14 x13
+ 297:matrix.c      ****     //
+ 298:matrix.c      ****     //   b--: Button state.(0: on, 1: off)
+ 299:matrix.c      ****     //   x--: X axis movement.
+ 300:matrix.c      ****     //   y--: Y axis movement.
+ 301:matrix.c      ****     len = adb_host_talk_buf(ADB_ADDR_MOUSE_POLL, ADB_REG_0, buf, sizeof(buf));
+ 302:matrix.c      **** 
+ 303:matrix.c      ****     // If nothing received reset mouse acceleration, and quit.
+ 304:matrix.c      ****     if (len < 2) {
+ 305:matrix.c      ****         mouseacc = 1;
+ 306:matrix.c      ****         return;
+ 307:matrix.c      ****     };
+ 308:matrix.c      **** 
+ 309:matrix.c      ****     // Store off-buttons and 0-movements in unused bytes
+ 310:matrix.c      ****     bool xneg = false;
+ 311:matrix.c      ****     bool yneg = false;
+ 312:matrix.c      ****     if (len == 2) {
+ 313:matrix.c      ****         if (buf[0] & 0x40) yneg = true;
+ 314:matrix.c      ****         if (buf[1] & 0x40) xneg = true;
+ 315:matrix.c      ****     } else {
+ 316:matrix.c      ****         if (buf[len - 1] & 0x40) yneg = true;
+ 317:matrix.c      ****         if (buf[len - 1] & 0x04) xneg = true;
+ 318:matrix.c      ****     }
+ 319:matrix.c      **** 
+ 320:matrix.c      ****     for (int8_t i = len; i < sizeof(buf); i++) {
+ 321:matrix.c      ****         buf[i] = 0x88;
+ 322:matrix.c      ****         if (yneg) buf[i] |= 0x70;
+ 323:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 324:matrix.c      ****     }
+ 325:matrix.c      **** 
+ 326:matrix.c      ****     // 8 buttons at max
+ 327:matrix.c      ****     // TODO: Fix HID report descriptor for mouse to support button6-8
+ 328:matrix.c      ****     uint8_t buttons = 0;
+ 329:matrix.c      ****     if (!(buf[4] & 0x08)) buttons |= MOUSE_BTN8;
+ 330:matrix.c      ****     if (!(buf[4] & 0x80)) buttons |= MOUSE_BTN7;
+ 331:matrix.c      ****     if (!(buf[3] & 0x08)) buttons |= MOUSE_BTN6;
+ 332:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 333:matrix.c      ****     if (!(buf[2] & 0x08)) buttons |= MOUSE_BTN4;
+ 334:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 335:matrix.c      ****     if (!(buf[1] & 0x80)) buttons |= MOUSE_BTN2;
+ 336:matrix.c      ****     if (!(buf[0] & 0x80)) buttons |= MOUSE_BTN1;
+ 337:matrix.c      ****     mouse_report.buttons = buttons;
+ 338:matrix.c      **** 
+ 339:matrix.c      ****     int16_t xx, yy;
+ 340:matrix.c      ****     yy = (buf[0] & 0x7F) | (buf[2] & 0x70) << 3 | (buf[3] & 0x70) << 6 | (buf[4] & 0x70) << 9;
+ 341:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 342:matrix.c      **** 
+ 343:matrix.c      ****     // Accelerate mouse. (They weren't meant to be used on screens larger than 320x200).
+ 344:matrix.c      ****     x = xx * mouseacc;
+ 345:matrix.c      ****     y = yy * mouseacc;
+ 346:matrix.c      **** 
+ 347:matrix.c      ****     // TODO: Fix HID report descriptor for mouse to support finer resolution
+ 348:matrix.c      ****     // Cap our two bytes per axis to one byte.
+ 349:matrix.c      ****     // Easier with a MIN-function, but since -MAX(-a,-b) = MIN(a,b)...
+ 350:matrix.c      ****     // I.E. MIN(MAX(x,-127),127) = -MAX(-MAX(x, -127), -127) = MIN(-MIN(-x,127),127)
+ 351:matrix.c      ****     mouse_report.x = -MAX(-MAX(x, -127), -127);
+ 352:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 353:matrix.c      **** 
+ 354:matrix.c      ****     if (debug_mouse) {
+ 355:matrix.c      ****         xprintf("Mouse: [");
+ 356:matrix.c      ****         for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 357:matrix.c      ****         xprintf("] ");
+ 358:matrix.c      ****         xprintf("[B:%02X, X:%d(%d), Y:%d(%d), A:%d]\n", mouse_report.buttons, mouse_report.x, xx, m
+ 359:matrix.c      ****     }
+ 360:matrix.c      **** 
+ 361:matrix.c      ****     // Send result by usb.
+ 362:matrix.c      ****     host_mouse_send(&mouse_report);
+ 363:matrix.c      **** 
+ 364:matrix.c      ****     // TODO: acceleration curve is needed for precise operation?
+ 365:matrix.c      ****     // increase acceleration of mouse
+ 366:matrix.c      ****     mouseacc += ( mouseacc < (mouse_cpi < 200 ? ADB_MOUSE_MAXACC : ADB_MOUSE_MAXACC/2) ? 1 : 0 );
+ 367:matrix.c      **** 
+ 368:matrix.c      ****     return;
+ 369:matrix.c      **** }
+ 370:matrix.c      **** #endif
+ 371:matrix.c      **** 
+ 372:matrix.c      **** uint8_t matrix_scan(void)
+ 373:matrix.c      **** {
+ 374:matrix.c      ****     /* extra_key is volatile and more convoluted than necessary because gcc refused
+ 375:matrix.c      ****     to generate valid code otherwise. Making extra_key uint8_t and constructing codes
+ 376:matrix.c      ****     here via codes = extra_key<<8 | 0xFF; would consistently fail to even LOAD
+ 377:matrix.c      ****     extra_key from memory, and leave garbage in the high byte of codes. I tried
+ 378:matrix.c      ****     dozens of code variations and it kept generating broken assembly output. So
+ 379:matrix.c      ****     beware if attempting to make extra_key code more logical and efficient. */
+ 380:matrix.c      ****     static volatile uint16_t extra_key = 0xFFFF;
+ 381:matrix.c      ****     uint16_t codes;
+ 382:matrix.c      ****     uint8_t key0, key1;
+ 383:matrix.c      **** 
+ 384:matrix.c      ****     /* tick of last polling */
+ 385:matrix.c      ****     static uint16_t tick_ms;
+ 386:matrix.c      **** 
+ 387:matrix.c      ****     codes = extra_key;
+ 388:matrix.c      ****     extra_key = 0xFFFF;
+ 389:matrix.c      **** 
+ 390:matrix.c      ****     if ( codes == 0xFFFF )
+ 391:matrix.c      ****     {
+ 392:matrix.c      ****         // polling with 12ms interval
+ 393:matrix.c      ****         if (timer_elapsed(tick_ms) < 12) return 0;
+ 394:matrix.c      ****         tick_ms = timer_read();
+ 395:matrix.c      **** 
+ 396:matrix.c      ****         codes = adb_host_kbd_recv(ADB_ADDR_KEYBOARD);
+ 397:matrix.c      **** 
+ 398:matrix.c      ****         // Adjustable keybaord media keys
+ 399:matrix.c      ****         if (codes == 0 && has_media_keys &&
+ 400:matrix.c      ****                 (codes = adb_host_kbd_recv(ADB_ADDR_APPLIANCE))) {
+ 401:matrix.c      ****             // key1
+ 402:matrix.c      ****             switch (codes & 0x7f ) {
+ 403:matrix.c      ****             case 0x00:  // Mic
+ 404:matrix.c      ****                 codes = (codes & ~0x007f) | 0x42;
+ 405:matrix.c      ****                 break;
+ 406:matrix.c      ****             case 0x01:  // Mute
+ 407:matrix.c      ****                 codes = (codes & ~0x007f) | 0x4a;
+ 408:matrix.c      ****                 break;
+ 409:matrix.c      ****             case 0x02:  // Volume down
+ 410:matrix.c      ****                 codes = (codes & ~0x007f) | 0x49;
+ 411:matrix.c      ****                 break;
+ 412:matrix.c      ****             case 0x03:  // Volume Up
+ 413:matrix.c      ****                 codes = (codes & ~0x007f) | 0x48;
+ 414:matrix.c      ****                 break;
+ 415:matrix.c      ****             case 0x7F:  // no code
+ 416:matrix.c      ****                 break;
+ 417:matrix.c      ****             default:
+ 418:matrix.c      ****                 xprintf("ERROR: media key1\n");
+ 419:matrix.c      ****                 return 0x11;
+ 420:matrix.c      ****             }
+ 421:matrix.c      ****             // key0
+ 422:matrix.c      ****             switch ((codes >> 8) & 0x7f ) {
+ 423:matrix.c      ****             case 0x00:  // Mic
+ 424:matrix.c      ****                 codes = (codes & ~0x7f00) | (0x42 << 8);
+ 425:matrix.c      ****                 break;
+ 426:matrix.c      ****             case 0x01:  // Mute
+ 427:matrix.c      ****                 codes = (codes & ~0x7f00) | (0x4a << 8);
+ 428:matrix.c      ****                 break;
+ 429:matrix.c      ****             case 0x02:  // Volume down
+ 430:matrix.c      ****                 codes = (codes & ~0x7f00) | (0x49 << 8);
+ 431:matrix.c      ****                 break;
+ 432:matrix.c      ****             case 0x03:  // Volume Up
+ 433:matrix.c      ****                 codes = (codes & ~0x7f00) | (0x48 << 8);
+ 434:matrix.c      ****                 break;
+ 435:matrix.c      ****             default:
+ 436:matrix.c      ****                 xprintf("ERROR: media key0\n");
+ 437:matrix.c      ****                 return 0x10;
+ 438:matrix.c      ****             }
+ 439:matrix.c      ****         }
+ 440:matrix.c      ****     }
+ 441:matrix.c      ****     key0 = codes>>8;
+ 442:matrix.c      ****     key1 = codes&0xFF;
+ 443:matrix.c      **** 
+ 444:matrix.c      ****     if (debug_matrix && codes) {
+ 445:matrix.c      ****         print("adb_host_kbd_recv: "); phex16(codes); print("\n");
+ 446:matrix.c      ****     }
+ 447:matrix.c      **** 
+ 448:matrix.c      ****     if (codes == 0) {                           // no keys
+ 449:matrix.c      ****         return 0;
+ 450:matrix.c      ****     } else if (codes == 0x7F7F) {   // power key press
+ 451:matrix.c      ****         register_key(0x7F);
+ 452:matrix.c      ****     } else if (codes == 0xFFFF) {   // power key release
+ 453:matrix.c      ****         register_key(0xFF);
+ 454:matrix.c      ****     } else {
+ 455:matrix.c      ****         // Macally keyboard sends keys inversely against ADB protocol
+ 456:matrix.c      ****         // https://deskthority.net/workshop-f7/macally-mk96-t20116.html
+ 457:matrix.c      ****         if (key0 == 0xFF) {
+ 458:matrix.c      ****             key0 = key1;
+ 459:matrix.c      ****             key1 = 0xFF;
+ 460:matrix.c      ****         }
+ 461:matrix.c      **** 
+ 462:matrix.c      ****         /* Swap codes for ISO keyboard
+ 463:matrix.c      ****          * https://github.com/tmk/tmk_keyboard/issues/35
+ 464:matrix.c      ****          *
+ 465:matrix.c      ****          * ANSI
+ 466:matrix.c      ****          * ,-----------    ----------.
+ 467:matrix.c      ****          * | *a|  1|  2     =|Backspa|
+ 468:matrix.c      ****          * |-----------    ----------|
+ 469:matrix.c      ****          * |Tab  |  Q|     |  ]|   *c|
+ 470:matrix.c      ****          * |-----------    ----------|
+ 471:matrix.c      ****          * |CapsLo|  A|    '|Return  |
+ 472:matrix.c      ****          * |-----------    ----------|
+ 473:matrix.c      ****          * |Shift   |      Shift     |
+ 474:matrix.c      ****          * `-----------    ----------'
+ 475:matrix.c      ****          *
+ 476:matrix.c      ****          * ISO
+ 477:matrix.c      ****          * ,-----------    ----------.
+ 478:matrix.c      ****          * | *a|  1|  2     =|Backspa|
+ 479:matrix.c      ****          * |-----------    ----------|
+ 480:matrix.c      ****          * |Tab  |  Q|     |  ]|Retur|
+ 481:matrix.c      ****          * |-----------    -----`    |
+ 482:matrix.c      ****          * |CapsLo|  A|    '| *c|    |
+ 483:matrix.c      ****          * |-----------    ----------|
+ 484:matrix.c      ****          * |Shif| *b|      Shift     |
+ 485:matrix.c      ****          * `-----------    ----------'
+ 486:matrix.c      ****          *
+ 487:matrix.c      ****          *         ADB scan code   USB usage
+ 488:matrix.c      ****          *         -------------   ---------
+ 489:matrix.c      ****          * Key     ANSI    ISO     ANSI    ISO
+ 490:matrix.c      ****          * ---------------------------------------------
+ 491:matrix.c      ****          * *a      0x32    0x0A    0x35    0x35
+ 492:matrix.c      ****          * *b      ----    0x32    ----    0x64
+ 493:matrix.c      ****          * *c      0x2A    0x2A    0x31    0x31(or 0x32)
+ 494:matrix.c      ****          */
+ 495:matrix.c      ****         if (is_iso_layout) {
+ 496:matrix.c      ****             if ((key0 & 0x7F) == 0x32) {
+ 497:matrix.c      ****                 key0 = (key0 & 0x80) | 0x0A;
+ 498:matrix.c      ****             } else if ((key0 & 0x7F) == 0x0A) {
+ 499:matrix.c      ****                 key0 = (key0 & 0x80) | 0x32;
+ 500:matrix.c      ****             }
+ 501:matrix.c      ****         }
+ 502:matrix.c      ****         register_key(key0);
+ 503:matrix.c      ****         if (key1 != 0xFF)       // key1 is 0xFF when no second key.
+ 504:matrix.c      ****             extra_key = key1<<8 | 0xFF; // process in a separate call
+ 505:matrix.c      ****     }
+ 506:matrix.c      **** 
+ 507:matrix.c      ****     return 1;
+ 508:matrix.c      **** }
+ 509:matrix.c      **** 
+ 510:matrix.c      **** inline
+ 511:matrix.c      **** matrix_row_t matrix_get_row(uint8_t row)
+ 512:matrix.c      **** {
+ 513:matrix.c      ****     return matrix[row];
+ 514:matrix.c      **** }
+ 515:matrix.c      **** 
+ 516:matrix.c      **** inline
+ 517:matrix.c      **** static void register_key(uint8_t key)
+ 518:matrix.c      **** {
+  16               		.loc 1 518 1 view -0
+  17               		.cfi_startproc
+  18               	/* prologue: function */
+  19               	/* frame size = 0 */
+  20               	/* stack size = 0 */
+  21               	.L__stack_usage = 0
+ 519:matrix.c      ****     uint8_t col, row;
+  22               		.loc 1 519 5 view .LVU1
+ 520:matrix.c      ****     col = key&0x07;
+  23               		.loc 1 520 5 view .LVU2
+ 521:matrix.c      ****     row = (key>>3)&0x0F;
+  24               		.loc 1 521 5 view .LVU3
+ 522:matrix.c      ****     if (key&0x80) {
+  25               		.loc 1 522 5 view .LVU4
+ 521:matrix.c      ****     row = (key>>3)&0x0F;
+  26               		.loc 1 521 19 is_stmt 0 view .LVU5
+  27 0000 E82F      		mov r30,r24
+  28 0002 E695      		lsr r30
+  29 0004 E695      		lsr r30
+  30 0006 E695      		lsr r30
+ 521:matrix.c      ****     row = (key>>3)&0x0F;
+  31               		.loc 1 521 9 view .LVU6
+  32 0008 EF70      		andi r30,lo8(15)
+  33               	.LVL1:
+ 521:matrix.c      ****     row = (key>>3)&0x0F;
+  34               		.loc 1 521 9 view .LVU7
+  35 000a F0E0      		ldi r31,0
+  36 000c E050      		subi r30,lo8(-(matrix))
+  37 000e F040      		sbci r31,hi8(-(matrix))
+  38               	.LVL2:
+ 521:matrix.c      ****     row = (key>>3)&0x0F;
+  39               		.loc 1 521 9 view .LVU8
+  40 0010 9081      		ld r25,Z
+ 520:matrix.c      ****     col = key&0x07;
+  41               		.loc 1 520 9 view .LVU9
+  42 0012 482F      		mov r20,r24
+  43 0014 4770      		andi r20,lo8(7)
+  44               	.LVL3:
+ 520:matrix.c      ****     col = key&0x07;
+  45               		.loc 1 520 9 view .LVU10
+  46 0016 21E0      		ldi r18,lo8(1)
+  47 0018 30E0      		ldi r19,0
+  48 001a 00C0      		rjmp 2f
+  49               		1:
+  50 001c 220F      		lsl r18
+  51               		2:
+  52 001e 4A95      		dec r20
+  53 0020 02F4      		brpl 1b
+  54               		.loc 1 522 8 view .LVU11
+  55 0022 87FF      		sbrs r24,7
+  56 0024 00C0      		rjmp .L2
+ 523:matrix.c      ****         matrix[row] &= ~(1<<col);
+  57               		.loc 1 523 9 is_stmt 1 view .LVU12
+  58               		.loc 1 523 21 is_stmt 0 view .LVU13
+  59 0026 2095      		com r18
+  60 0028 2923      		and r18,r25
+  61               	.L4:
+ 524:matrix.c      ****     } else {
+ 525:matrix.c      ****         matrix[row] |=  (1<<col);
+  62               		.loc 1 525 21 view .LVU14
+  63 002a 2083      		st Z,r18
+  64               	/* epilogue start */
+ 526:matrix.c      ****     }
+ 527:matrix.c      **** }
+  65               		.loc 1 527 1 view .LVU15
+  66 002c 0895      		ret
+  67               	.L2:
+ 525:matrix.c      ****     }
+  68               		.loc 1 525 9 is_stmt 1 view .LVU16
+ 525:matrix.c      ****     }
+  69               		.loc 1 525 21 is_stmt 0 view .LVU17
+  70 002e 292B      		or r18,r25
+  71 0030 00C0      		rjmp .L4
+  72               		.cfi_endproc
+  73               	.LFE13:
+  75               		.section	.text.device_scan,"ax",@progbits
+  77               	device_scan:
+  78               	.LFB7:
+  53:matrix.c      ****     xprintf("\nScan:\n");
+  79               		.loc 1 53 1 is_stmt 1 view -0
+  80               		.cfi_startproc
+  81 0000 0F93      		push r16
+  82               	.LCFI0:
+  83               		.cfi_def_cfa_offset 3
+  84               		.cfi_offset 16, -2
+  85 0002 1F93      		push r17
+  86               	.LCFI1:
+  87               		.cfi_def_cfa_offset 4
+  88               		.cfi_offset 17, -3
+  89 0004 CF93      		push r28
+  90               	.LCFI2:
+  91               		.cfi_def_cfa_offset 5
+  92               		.cfi_offset 28, -4
+  93 0006 DF93      		push r29
+  94               	.LCFI3:
+  95               		.cfi_def_cfa_offset 6
+  96               		.cfi_offset 29, -5
+  97               	/* prologue: function */
+  98               	/* frame size = 0 */
+  99               	/* stack size = 4 */
+ 100               	.L__stack_usage = 4
+  54:matrix.c      ****     for (uint8_t addr = 0; addr < 16; addr++) {
+ 101               		.loc 1 54 5 view .LVU19
+ 102               	.LBB24:
+  54:matrix.c      ****     for (uint8_t addr = 0; addr < 16; addr++) {
+ 103               		.loc 1 54 5 view .LVU20
+  54:matrix.c      ****     for (uint8_t addr = 0; addr < 16; addr++) {
+ 104               		.loc 1 54 5 view .LVU21
+ 105               	.LBE24:
+ 106 0008 80E0      		ldi r24,lo8(__c.2260)
+ 107 000a 90E0      		ldi r25,hi8(__c.2260)
+ 108 000c 9F93      		push r25
+ 109               	.LCFI4:
+ 110               		.cfi_def_cfa_offset 7
+ 111 000e 8F93      		push r24
+ 112               	.LCFI5:
+ 113               		.cfi_def_cfa_offset 8
+ 114 0010 0E94 0000 		call __xprintf
+ 115               	.LVL4:
+  55:matrix.c      ****         uint16_t reg3 = adb_host_talk(addr, ADB_REG_3);
+ 116               		.loc 1 55 5 view .LVU22
+ 117               	.LBB25:
+  55:matrix.c      ****         uint16_t reg3 = adb_host_talk(addr, ADB_REG_3);
+ 118               		.loc 1 55 10 view .LVU23
+  55:matrix.c      ****         uint16_t reg3 = adb_host_talk(addr, ADB_REG_3);
+ 119               		.loc 1 55 10 is_stmt 0 view .LVU24
+ 120               	.LBE25:
+  54:matrix.c      ****     for (uint8_t addr = 0; addr < 16; addr++) {
+ 121               		.loc 1 54 5 view .LVU25
+ 122 0014 0F90      		pop __tmp_reg__
+ 123 0016 0F90      		pop __tmp_reg__
+ 124               	.LCFI6:
+ 125               		.cfi_def_cfa_offset 6
+ 126 0018 D0E0      		ldi r29,0
+ 127 001a C0E0      		ldi r28,0
+ 128               	.LBB28:
+ 129               	.LBB26:
+  58:matrix.c      ****         }
+ 130               		.loc 1 58 13 view .LVU26
+ 131 001c 00E0      		ldi r16,lo8(__c.2264)
+ 132 001e 10E0      		ldi r17,hi8(__c.2264)
+ 133               	.LVL5:
+ 134               	.L7:
+  56:matrix.c      ****         if (reg3) {
+ 135               		.loc 1 56 9 is_stmt 1 view .LVU27
+  56:matrix.c      ****         if (reg3) {
+ 136               		.loc 1 56 25 is_stmt 0 view .LVU28
+ 137 0020 63E0      		ldi r22,lo8(3)
+ 138 0022 8C2F      		mov r24,r28
+ 139 0024 0E94 0000 		call adb_host_talk
+ 140               	.LVL6:
+ 141 0028 9C01      		movw r18,r24
+ 142               	.LVL7:
+  57:matrix.c      ****             xprintf(" addr:%d, reg3:%04X\n", addr, reg3);
+ 143               		.loc 1 57 9 is_stmt 1 view .LVU29
+  57:matrix.c      ****             xprintf(" addr:%d, reg3:%04X\n", addr, reg3);
+ 144               		.loc 1 57 12 is_stmt 0 view .LVU30
+ 145 002a 0097      		sbiw r24,0
+ 146 002c 01F0      		breq .L6
+  58:matrix.c      ****         }
+ 147               		.loc 1 58 13 is_stmt 1 view .LVU31
+ 148               	.LBB27:
+  58:matrix.c      ****         }
+ 149               		.loc 1 58 13 view .LVU32
+  58:matrix.c      ****         }
+ 150               		.loc 1 58 13 view .LVU33
+ 151               	.LBE27:
+ 152 002e 3F93      		push r19
+ 153               	.LCFI7:
+ 154               		.cfi_def_cfa_offset 7
+ 155 0030 8F93      		push r24
+ 156               	.LCFI8:
+ 157               		.cfi_def_cfa_offset 8
+ 158 0032 DF93      		push r29
+ 159               	.LCFI9:
+ 160               		.cfi_def_cfa_offset 9
+ 161 0034 CF93      		push r28
+ 162               	.LCFI10:
+ 163               		.cfi_def_cfa_offset 10
+ 164 0036 1F93      		push r17
+ 165               	.LCFI11:
+ 166               		.cfi_def_cfa_offset 11
+ 167 0038 0F93      		push r16
+ 168               	.LCFI12:
+ 169               		.cfi_def_cfa_offset 12
+ 170 003a 0E94 0000 		call __xprintf
+ 171               	.LVL8:
+  58:matrix.c      ****         }
+ 172               		.loc 1 58 13 is_stmt 0 view .LVU34
+ 173 003e 0F90      		pop __tmp_reg__
+ 174 0040 0F90      		pop __tmp_reg__
+ 175 0042 0F90      		pop __tmp_reg__
+ 176 0044 0F90      		pop __tmp_reg__
+ 177 0046 0F90      		pop __tmp_reg__
+ 178 0048 0F90      		pop __tmp_reg__
+ 179               	.LCFI13:
+ 180               		.cfi_def_cfa_offset 6
+ 181               	.L6:
+ 182               	.LVL9:
+  58:matrix.c      ****         }
+ 183               		.loc 1 58 13 view .LVU35
+ 184 004a 2196      		adiw r28,1
+ 185               	.LVL10:
+  58:matrix.c      ****         }
+ 186               		.loc 1 58 13 view .LVU36
+ 187               	.LBE26:
+  55:matrix.c      ****         uint16_t reg3 = adb_host_talk(addr, ADB_REG_3);
+ 188               		.loc 1 55 5 discriminator 2 view .LVU37
+ 189 004c C031      		cpi r28,16
+ 190 004e D105      		cpc r29,__zero_reg__
+ 191 0050 01F4      		brne .L7
+ 192               	/* epilogue start */
+ 193               	.LBE28:
+  61:matrix.c      **** 
+ 194               		.loc 1 61 1 view .LVU38
+ 195 0052 DF91      		pop r29
+ 196 0054 CF91      		pop r28
+ 197               	.LVL11:
+  61:matrix.c      **** 
+ 198               		.loc 1 61 1 view .LVU39
+ 199 0056 1F91      		pop r17
+ 200 0058 0F91      		pop r16
+ 201 005a 0895      		ret
+ 202               		.cfi_endproc
+ 203               	.LFE7:
+ 205               		.section	.text.mouse_init.constprop.0,"ax",@progbits
+ 207               	mouse_init.constprop.0:
+ 208               	.LFB15:
+ 136:matrix.c      **** {
+ 209               		.loc 1 136 13 is_stmt 1 view -0
+ 210               		.cfi_startproc
+ 211 0000 3F92      		push r3
+ 212               	.LCFI14:
+ 213               		.cfi_def_cfa_offset 3
+ 214               		.cfi_offset 3, -2
+ 215 0002 4F92      		push r4
+ 216               	.LCFI15:
+ 217               		.cfi_def_cfa_offset 4
+ 218               		.cfi_offset 4, -3
+ 219 0004 5F92      		push r5
+ 220               	.LCFI16:
+ 221               		.cfi_def_cfa_offset 5
+ 222               		.cfi_offset 5, -4
+ 223 0006 6F92      		push r6
+ 224               	.LCFI17:
+ 225               		.cfi_def_cfa_offset 6
+ 226               		.cfi_offset 6, -5
+ 227 0008 7F92      		push r7
+ 228               	.LCFI18:
+ 229               		.cfi_def_cfa_offset 7
+ 230               		.cfi_offset 7, -6
+ 231 000a 8F92      		push r8
+ 232               	.LCFI19:
+ 233               		.cfi_def_cfa_offset 8
+ 234               		.cfi_offset 8, -7
+ 235 000c 9F92      		push r9
+ 236               	.LCFI20:
+ 237               		.cfi_def_cfa_offset 9
+ 238               		.cfi_offset 9, -8
+ 239 000e AF92      		push r10
+ 240               	.LCFI21:
+ 241               		.cfi_def_cfa_offset 10
+ 242               		.cfi_offset 10, -9
+ 243 0010 BF92      		push r11
+ 244               	.LCFI22:
+ 245               		.cfi_def_cfa_offset 11
+ 246               		.cfi_offset 11, -10
+ 247 0012 CF92      		push r12
+ 248               	.LCFI23:
+ 249               		.cfi_def_cfa_offset 12
+ 250               		.cfi_offset 12, -11
+ 251 0014 DF92      		push r13
+ 252               	.LCFI24:
+ 253               		.cfi_def_cfa_offset 13
+ 254               		.cfi_offset 13, -12
+ 255 0016 EF92      		push r14
+ 256               	.LCFI25:
+ 257               		.cfi_def_cfa_offset 14
+ 258               		.cfi_offset 14, -13
+ 259 0018 FF92      		push r15
+ 260               	.LCFI26:
+ 261               		.cfi_def_cfa_offset 15
+ 262               		.cfi_offset 15, -14
+ 263 001a 0F93      		push r16
+ 264               	.LCFI27:
+ 265               		.cfi_def_cfa_offset 16
+ 266               		.cfi_offset 16, -15
+ 267 001c 1F93      		push r17
+ 268               	.LCFI28:
+ 269               		.cfi_def_cfa_offset 17
+ 270               		.cfi_offset 17, -16
+ 271 001e CF93      		push r28
+ 272               	.LCFI29:
+ 273               		.cfi_def_cfa_offset 18
+ 274               		.cfi_offset 28, -17
+ 275 0020 DF93      		push r29
+ 276               	.LCFI30:
+ 277               		.cfi_def_cfa_offset 19
+ 278               		.cfi_offset 29, -18
+ 279 0022 CDB7      		in r28,__SP_L__
+ 280 0024 DEB7      		in r29,__SP_H__
+ 281               	.LCFI31:
+ 282               		.cfi_def_cfa_register 28
+ 283 0026 2897      		sbiw r28,8
+ 284               	.LCFI32:
+ 285               		.cfi_def_cfa_offset 27
+ 286 0028 0FB6      		in __tmp_reg__,__SREG__
+ 287 002a F894      		cli
+ 288 002c DEBF      		out __SP_H__,r29
+ 289 002e 0FBE      		out __SREG__,__tmp_reg__
+ 290 0030 CDBF      		out __SP_L__,r28
+ 291               	/* prologue: function */
+ 292               	/* frame size = 8 */
+ 293               	/* stack size = 25 */
+ 294               	.L__stack_usage = 25
+ 295               	.LVL12:
+ 296               	.LBB29:
+ 229:matrix.c      **** 
+ 297               		.loc 1 229 9 is_stmt 0 view .LVU41
+ 298 0032 90E0      		ldi r25,lo8(__c.2333)
+ 299 0034 492E      		mov r4,r25
+ 300 0036 90E0      		ldi r25,hi8(__c.2333)
+ 301 0038 592E      		mov r5,r25
+ 302               	.LBE29:
+ 303               	.LBB30:
+ 224:matrix.c      ****         }
+ 304               		.loc 1 224 13 view .LVU42
+ 305 003a 20E0      		ldi r18,lo8(__c.2331)
+ 306 003c 622E      		mov r6,r18
+ 307 003e 20E0      		ldi r18,hi8(__c.2331)
+ 308 0040 722E      		mov r7,r18
+ 212:matrix.c      ****             // Move it to addr0 to remove this device and get new device with handle id 50 on addr 
+ 309               		.loc 1 212 13 view .LVU43
+ 310 0042 30E0      		ldi r19,lo8(__c.2329)
+ 311 0044 C32E      		mov r12,r19
+ 312 0046 30E0      		ldi r19,hi8(__c.2329)
+ 313 0048 D32E      		mov r13,r19
+ 314               	.LBB31:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 315               		.loc 1 205 46 view .LVU44
+ 316 004a 40E0      		ldi r20,lo8(__c.2322)
+ 317 004c A42E      		mov r10,r20
+ 318 004e 40E0      		ldi r20,hi8(__c.2322)
+ 319 0050 B42E      		mov r11,r20
+ 320               	.L13:
+ 321               	.LBE31:
+ 322               	.LBE30:
+ 138:matrix.c      ****     uint8_t mouse_handler;
+ 323               		.loc 1 138 5 is_stmt 1 view .LVU45
+ 139:matrix.c      ****     uint8_t addr;
+ 324               		.loc 1 139 5 view .LVU46
+ 140:matrix.c      **** 
+ 325               		.loc 1 140 5 view .LVU47
+ 143:matrix.c      ****     if (!reg3) return;
+ 326               		.loc 1 143 5 view .LVU48
+ 143:matrix.c      ****     if (!reg3) return;
+ 327               		.loc 1 143 30 is_stmt 0 view .LVU49
+ 328 0052 63E0      		ldi r22,lo8(3)
+ 329 0054 83E0      		ldi r24,lo8(3)
+ 330 0056 0E94 0000 		call adb_host_talk
+ 331               	.LVL13:
+ 332 005a 8C01      		movw r16,r24
+ 333               	.LVL14:
+ 144:matrix.c      ****     dmprintf("addr%d reg3: %02X\n", orig_addr, reg3);
+ 334               		.loc 1 144 5 is_stmt 1 view .LVU50
+ 144:matrix.c      ****     dmprintf("addr%d reg3: %02X\n", orig_addr, reg3);
+ 335               		.loc 1 144 8 is_stmt 0 view .LVU51
+ 336 005c 892B      		or r24,r25
+ 337 005e 01F4      		brne .+2
+ 338 0060 00C0      		rjmp .L53
+ 145:matrix.c      **** 
+ 339               		.loc 1 145 5 is_stmt 1 view .LVU52
+ 145:matrix.c      **** 
+ 340               		.loc 1 145 5 view .LVU53
+ 341 0062 8091 0000 		lds r24,debug_config
+ 342 0066 83FF      		sbrs r24,3
+ 343 0068 00C0      		rjmp .L15
+ 145:matrix.c      **** 
+ 344               		.loc 1 145 5 view .LVU54
+ 145:matrix.c      **** 
+ 345               		.loc 1 145 5 view .LVU55
+ 145:matrix.c      **** 
+ 346               		.loc 1 145 5 view .LVU56
+ 347 006a 1F93      		push r17
+ 348 006c 0F93      		push r16
+ 349 006e 1F92      		push __zero_reg__
+ 350 0070 83E0      		ldi r24,lo8(3)
+ 351 0072 8F93      		push r24
+ 352 0074 80E0      		ldi r24,lo8(__c.2306)
+ 353 0076 90E0      		ldi r25,hi8(__c.2306)
+ 354 0078 9F93      		push r25
+ 355 007a 8F93      		push r24
+ 356 007c 0E94 0000 		call __xprintf
+ 357               	.LVL15:
+ 358 0080 0F90      		pop __tmp_reg__
+ 359 0082 0F90      		pop __tmp_reg__
+ 360 0084 0F90      		pop __tmp_reg__
+ 361 0086 0F90      		pop __tmp_reg__
+ 362 0088 0F90      		pop __tmp_reg__
+ 363 008a 0F90      		pop __tmp_reg__
+ 364               	.L15:
+ 148:matrix.c      ****     adb_host_listen(orig_addr, ADB_REG_3, ((reg3 >> 8) & 0xF0) | ADB_ADDR_TMP, 0xFE);
+ 365               		.loc 1 148 5 view .LVU57
+ 366 008c 83E0      		ldi r24,lo8(3)
+ 367 008e 0E94 0000 		call adb_host_flush
+ 368               	.LVL16:
+ 149:matrix.c      ****     adb_host_flush(ADB_ADDR_TMP);
+ 369               		.loc 1 149 5 view .LVU58
+ 370 0092 412F      		mov r20,r17
+ 371 0094 4F60      		ori r20,lo8(15)
+ 372 0096 2EEF      		ldi r18,lo8(-2)
+ 373 0098 63E0      		ldi r22,lo8(3)
+ 374 009a 83E0      		ldi r24,lo8(3)
+ 375 009c 0E94 0000 		call adb_host_listen
+ 376               	.LVL17:
+ 150:matrix.c      **** 
+ 377               		.loc 1 150 5 view .LVU59
+ 378 00a0 8FE0      		ldi r24,lo8(15)
+ 379 00a2 0E94 0000 		call adb_host_flush
+ 380               	.LVL18:
+ 152:matrix.c      ****     if (!reg3) {
+ 381               		.loc 1 152 5 view .LVU60
+ 152:matrix.c      ****     if (!reg3) {
+ 382               		.loc 1 152 30 is_stmt 0 view .LVU61
+ 383 00a6 63E0      		ldi r22,lo8(3)
+ 384 00a8 8FE0      		ldi r24,lo8(15)
+ 385 00aa 0E94 0000 		call adb_host_talk
+ 386               	.LVL19:
+ 387 00ae 8C01      		movw r16,r24
+ 388               	.LVL20:
+ 153:matrix.c      ****         dmprintf("move fail\n");
+ 389               		.loc 1 153 5 is_stmt 1 view .LVU62
+ 390 00b0 8091 0000 		lds r24,debug_config
+ 153:matrix.c      ****         dmprintf("move fail\n");
+ 391               		.loc 1 153 8 is_stmt 0 view .LVU63
+ 392 00b4 0115      		cp r16,__zero_reg__
+ 393 00b6 1105      		cpc r17,__zero_reg__
+ 394 00b8 01F4      		brne .L16
+ 154:matrix.c      ****         goto again;
+ 395               		.loc 1 154 9 is_stmt 1 view .LVU64
+ 154:matrix.c      ****         goto again;
+ 396               		.loc 1 154 9 view .LVU65
+ 397 00ba 83FF      		sbrs r24,3
+ 398 00bc 00C0      		rjmp .L13
+ 154:matrix.c      ****         goto again;
+ 399               		.loc 1 154 9 view .LVU66
+ 154:matrix.c      ****         goto again;
+ 400               		.loc 1 154 9 view .LVU67
+ 154:matrix.c      ****         goto again;
+ 401               		.loc 1 154 9 view .LVU68
+ 402 00be 80E0      		ldi r24,lo8(__c.2308)
+ 403 00c0 90E0      		ldi r25,hi8(__c.2308)
+ 404 00c2 9F93      		push r25
+ 405 00c4 8F93      		push r24
+ 406 00c6 0E94 0000 		call __xprintf
+ 407               	.LVL21:
+ 408 00ca 0F90      		pop __tmp_reg__
+ 409 00cc 0F90      		pop __tmp_reg__
+ 410 00ce 00C0      		rjmp .L13
+ 411               	.L16:
+ 157:matrix.c      ****     dmprintf("addr%d reg3: %02X\n", addr, reg3);
+ 412               		.loc 1 157 5 view .LVU69
+ 413               	.LVL22:
+ 158:matrix.c      **** 
+ 414               		.loc 1 158 5 view .LVU70
+ 158:matrix.c      **** 
+ 415               		.loc 1 158 5 view .LVU71
+ 416 00d0 83FF      		sbrs r24,3
+ 417 00d2 00C0      		rjmp .L19
+ 158:matrix.c      **** 
+ 418               		.loc 1 158 5 view .LVU72
+ 158:matrix.c      **** 
+ 419               		.loc 1 158 5 view .LVU73
+ 158:matrix.c      **** 
+ 420               		.loc 1 158 5 view .LVU74
+ 421 00d4 1F93      		push r17
+ 422 00d6 0F93      		push r16
+ 423 00d8 1F92      		push __zero_reg__
+ 424 00da 8FE0      		ldi r24,lo8(15)
+ 425 00dc 8F93      		push r24
+ 426 00de 80E0      		ldi r24,lo8(__c.2310)
+ 427 00e0 90E0      		ldi r25,hi8(__c.2310)
+ 428 00e2 9F93      		push r25
+ 429 00e4 8F93      		push r24
+ 430 00e6 0E94 0000 		call __xprintf
+ 431               	.LVL23:
+ 432 00ea 0F90      		pop __tmp_reg__
+ 433 00ec 0F90      		pop __tmp_reg__
+ 434 00ee 0F90      		pop __tmp_reg__
+ 435 00f0 0F90      		pop __tmp_reg__
+ 436 00f2 0F90      		pop __tmp_reg__
+ 437 00f4 0F90      		pop __tmp_reg__
+ 438               	.L19:
+ 152:matrix.c      ****     if (!reg3) {
+ 439               		.loc 1 152 19 is_stmt 0 view .LVU75
+ 440 00f6 902E      		mov r9,r16
+ 441               	.LBB35:
+ 200:matrix.c      ****         }
+ 442               		.loc 1 200 23 view .LVU76
+ 443 00f8 84E6      		ldi r24,lo8(100)
+ 444 00fa E82E      		mov r14,r24
+ 445 00fc F12C      		mov r15,__zero_reg__
+ 446               	.LVL24:
+ 447               	.L20:
+ 200:matrix.c      ****         }
+ 448               		.loc 1 200 23 view .LVU77
+ 449               	.LBE35:
+ 162:matrix.c      ****         adb_host_flush(addr);
+ 450               		.loc 1 162 5 is_stmt 1 view .LVU78
+ 162:matrix.c      ****         adb_host_flush(addr);
+ 451               		.loc 1 162 53 is_stmt 0 view .LVU79
+ 452 00fe 8FEF      		ldi r24,lo8(-1)
+ 453 0100 890D      		add r24,r9
+ 162:matrix.c      ****         adb_host_flush(addr);
+ 454               		.loc 1 162 8 view .LVU80
+ 455 0102 8230      		cpi r24,lo8(2)
+ 456 0104 00F0      		brlo .+2
+ 457 0106 00C0      		rjmp .L21
+ 163:matrix.c      ****         adb_host_listen(addr, ADB_REG_3, (reg3 >> 8), ADB_HANDLER_EXTENDED_MOUSE);
+ 458               		.loc 1 163 9 is_stmt 1 view .LVU81
+ 459 0108 8FE0      		ldi r24,lo8(15)
+ 460 010a 0E94 0000 		call adb_host_flush
+ 461               	.LVL25:
+ 164:matrix.c      **** 
+ 462               		.loc 1 164 9 view .LVU82
+ 463 010e 24E0      		ldi r18,lo8(4)
+ 464 0110 412F      		mov r20,r17
+ 465 0112 63E0      		ldi r22,lo8(3)
+ 466 0114 8FE0      		ldi r24,lo8(15)
+ 467 0116 0E94 0000 		call adb_host_listen
+ 468               	.LVL26:
+ 166:matrix.c      **** 
+ 469               		.loc 1 166 9 view .LVU83
+ 166:matrix.c      **** 
+ 470               		.loc 1 166 34 is_stmt 0 view .LVU84
+ 471 011a 63E0      		ldi r22,lo8(3)
+ 472 011c 8FE0      		ldi r24,lo8(15)
+ 473 011e 0E94 0000 		call adb_host_talk
+ 474               	.LVL27:
+ 475 0122 8C01      		movw r16,r24
+ 166:matrix.c      **** 
+ 476               		.loc 1 166 23 view .LVU85
+ 477 0124 982E      		mov r9,r24
+ 478               	.LVL28:
+ 169:matrix.c      ****             adb_host_flush(addr);
+ 479               		.loc 1 169 9 is_stmt 1 view .LVU86
+ 169:matrix.c      ****             adb_host_flush(addr);
+ 480               		.loc 1 169 12 is_stmt 0 view .LVU87
+ 481 0126 21E0      		ldi r18,lo8(1)
+ 482 0128 8213      		cpse r24,r18
+ 483 012a 00C0      		rjmp .L22
+ 170:matrix.c      ****             adb_host_listen(addr, ADB_REG_3, (reg3 >> 8), ADB_HANDLER_CLASSIC2_MOUSE);
+ 484               		.loc 1 170 13 is_stmt 1 view .LVU88
+ 485 012c 8FE0      		ldi r24,lo8(15)
+ 486 012e 0E94 0000 		call adb_host_flush
+ 487               	.LVL29:
+ 171:matrix.c      **** 
+ 488               		.loc 1 171 13 view .LVU89
+ 489 0132 22E0      		ldi r18,lo8(2)
+ 490 0134 412F      		mov r20,r17
+ 491 0136 63E0      		ldi r22,lo8(3)
+ 492 0138 8FE0      		ldi r24,lo8(15)
+ 493 013a 0E94 0000 		call adb_host_listen
+ 494               	.LVL30:
+ 173:matrix.c      ****         }
+ 495               		.loc 1 173 13 view .LVU90
+ 173:matrix.c      ****         }
+ 496               		.loc 1 173 38 is_stmt 0 view .LVU91
+ 497 013e 63E0      		ldi r22,lo8(3)
+ 498 0140 8FE0      		ldi r24,lo8(15)
+ 499 0142 0E94 0000 		call adb_host_talk
+ 500               	.LVL31:
+ 501 0146 8C01      		movw r16,r24
+ 173:matrix.c      ****         }
+ 502               		.loc 1 173 27 view .LVU92
+ 503 0148 982E      		mov r9,r24
+ 176:matrix.c      ****             xprintf("Classic 100cpi\n");
+ 504               		.loc 1 176 9 is_stmt 1 view .LVU93
+ 176:matrix.c      ****             xprintf("Classic 100cpi\n");
+ 505               		.loc 1 176 12 is_stmt 0 view .LVU94
+ 506 014a 31E0      		ldi r19,lo8(1)
+ 507 014c 8317      		cp r24,r19
+ 508 014e 01F0      		breq .L23
+ 509               	.L22:
+ 510               	.LVL32:
+ 180:matrix.c      ****             xprintf("Classic 200cpi\n");
+ 511               		.loc 1 180 9 is_stmt 1 view .LVU95
+ 180:matrix.c      ****             xprintf("Classic 200cpi\n");
+ 512               		.loc 1 180 12 is_stmt 0 view .LVU96
+ 513 0150 82E0      		ldi r24,lo8(2)
+ 514 0152 9812      		cpse r9,r24
+ 515 0154 00C0      		rjmp .L21
+ 181:matrix.c      ****             mouse_cpi = 200;
+ 516               		.loc 1 181 13 is_stmt 1 view .LVU97
+ 181:matrix.c      ****             mouse_cpi = 200;
+ 517               		.loc 1 181 13 view .LVU98
+ 181:matrix.c      ****             mouse_cpi = 200;
+ 518               		.loc 1 181 13 view .LVU99
+ 519 0156 80E0      		ldi r24,lo8(__c.2315)
+ 520 0158 90E0      		ldi r25,hi8(__c.2315)
+ 521 015a 9F93      		push r25
+ 522 015c 8F93      		push r24
+ 523 015e 0E94 0000 		call __xprintf
+ 524               	.LVL33:
+ 182:matrix.c      ****         }
+ 525               		.loc 1 182 13 view .LVU100
+ 182:matrix.c      ****         }
+ 526               		.loc 1 182 23 is_stmt 0 view .LVU101
+ 527 0162 28EC      		ldi r18,lo8(-56)
+ 528 0164 30E0      		ldi r19,0
+ 529 0166 3093 0000 		sts mouse_cpi+1,r19
+ 530 016a 2093 0000 		sts mouse_cpi,r18
+ 531               	.LVL34:
+ 187:matrix.c      ****         // Device info format(reg1 8-byte data)
+ 532               		.loc 1 187 5 is_stmt 1 view .LVU102
+ 533 016e 00C0      		rjmp .L54
+ 534               	.LVL35:
+ 535               	.L23:
+ 177:matrix.c      ****             mouse_cpi = 100;
+ 536               		.loc 1 177 13 view .LVU103
+ 177:matrix.c      ****             mouse_cpi = 100;
+ 537               		.loc 1 177 13 view .LVU104
+ 177:matrix.c      ****             mouse_cpi = 100;
+ 538               		.loc 1 177 13 view .LVU105
+ 539 0170 E0E0      		ldi r30,lo8(__c.2313)
+ 540 0172 F0E0      		ldi r31,hi8(__c.2313)
+ 541 0174 FF93      		push r31
+ 542 0176 EF93      		push r30
+ 543 0178 0E94 0000 		call __xprintf
+ 544               	.LVL36:
+ 178:matrix.c      ****         }
+ 545               		.loc 1 178 13 view .LVU106
+ 178:matrix.c      ****         }
+ 546               		.loc 1 178 23 is_stmt 0 view .LVU107
+ 547 017c F092 0000 		sts mouse_cpi+1,r15
+ 548 0180 E092 0000 		sts mouse_cpi,r14
+ 180:matrix.c      ****             xprintf("Classic 200cpi\n");
+ 549               		.loc 1 180 9 is_stmt 1 view .LVU108
+ 550               	.LVL37:
+ 187:matrix.c      ****         // Device info format(reg1 8-byte data)
+ 551               		.loc 1 187 5 view .LVU109
+ 552               	.L54:
+ 553               	.LBB36:
+ 240:matrix.c      ****     }
+ 554               		.loc 1 240 9 is_stmt 0 view .LVU110
+ 555 0184 0F90      		pop __tmp_reg__
+ 556 0186 0F90      		pop __tmp_reg__
+ 557               	.L25:
+ 558               	.LBE36:
+ 245:matrix.c      ****     adb_host_listen(addr, ADB_REG_3, ((reg3 >> 8) & 0xF0) | ADB_ADDR_MOUSE_POLL, 0xFE);
+ 559               		.loc 1 245 5 is_stmt 1 view .LVU111
+ 560 0188 8FE0      		ldi r24,lo8(15)
+ 561 018a 0E94 0000 		call adb_host_flush
+ 562               	.LVL38:
+ 246:matrix.c      ****     adb_host_flush(ADB_ADDR_MOUSE_POLL);
+ 563               		.loc 1 246 5 view .LVU112
+ 246:matrix.c      ****     adb_host_flush(ADB_ADDR_MOUSE_POLL);
+ 564               		.loc 1 246 51 is_stmt 0 view .LVU113
+ 565 018e 412F      		mov r20,r17
+ 566 0190 407F      		andi r20,lo8(-16)
+ 246:matrix.c      ****     adb_host_flush(ADB_ADDR_MOUSE_POLL);
+ 567               		.loc 1 246 5 view .LVU114
+ 568 0192 4A60      		ori r20,lo8(10)
+ 569 0194 2EEF      		ldi r18,lo8(-2)
+ 570 0196 63E0      		ldi r22,lo8(3)
+ 571 0198 8FE0      		ldi r24,lo8(15)
+ 572 019a 0E94 0000 		call adb_host_listen
+ 573               	.LVL39:
+ 247:matrix.c      **** 
+ 574               		.loc 1 247 5 is_stmt 1 view .LVU115
+ 575 019e 8AE0      		ldi r24,lo8(10)
+ 576 01a0 0E94 0000 		call adb_host_flush
+ 577               	.LVL40:
+ 249:matrix.c      ****     if (reg3) {
+ 578               		.loc 1 249 5 view .LVU116
+ 249:matrix.c      ****     if (reg3) {
+ 579               		.loc 1 249 30 is_stmt 0 view .LVU117
+ 580 01a4 63E0      		ldi r22,lo8(3)
+ 581 01a6 8FE0      		ldi r24,lo8(15)
+ 582 01a8 0E94 0000 		call adb_host_talk
+ 583               	.LVL41:
+ 584 01ac 8C01      		movw r16,r24
+ 585               	.LVL42:
+ 249:matrix.c      ****     if (reg3) {
+ 586               		.loc 1 249 19 view .LVU118
+ 587 01ae 982E      		mov r9,r24
+ 588               	.LVL43:
+ 250:matrix.c      ****         dmprintf("detect again\n");
+ 589               		.loc 1 250 5 is_stmt 1 view .LVU119
+ 250:matrix.c      ****         dmprintf("detect again\n");
+ 590               		.loc 1 250 8 is_stmt 0 view .LVU120
+ 591 01b0 892B      		or r24,r25
+ 592 01b2 01F4      		brne .+2
+ 593 01b4 00C0      		rjmp .L13
+ 251:matrix.c      ****         goto detect_again;
+ 594               		.loc 1 251 9 is_stmt 1 view .LVU121
+ 251:matrix.c      ****         goto detect_again;
+ 595               		.loc 1 251 9 view .LVU122
+ 596 01b6 8091 0000 		lds r24,debug_config
+ 597 01ba 83FF      		sbrs r24,3
+ 598 01bc 00C0      		rjmp .L20
+ 251:matrix.c      ****         goto detect_again;
+ 599               		.loc 1 251 9 view .LVU123
+ 251:matrix.c      ****         goto detect_again;
+ 600               		.loc 1 251 9 view .LVU124
+ 251:matrix.c      ****         goto detect_again;
+ 601               		.loc 1 251 9 view .LVU125
+ 602 01be E0E0      		ldi r30,lo8(__c.2337)
+ 603 01c0 F0E0      		ldi r31,hi8(__c.2337)
+ 604 01c2 FF93      		push r31
+ 605 01c4 EF93      		push r30
+ 606 01c6 0E94 0000 		call __xprintf
+ 607               	.LVL44:
+ 608 01ca 0F90      		pop __tmp_reg__
+ 609 01cc 0F90      		pop __tmp_reg__
+ 610 01ce 00C0      		rjmp .L20
+ 611               	.LVL45:
+ 612               	.L21:
+ 187:matrix.c      ****         // Device info format(reg1 8-byte data)
+ 613               		.loc 1 187 5 view .LVU126
+ 187:matrix.c      ****         // Device info format(reg1 8-byte data)
+ 614               		.loc 1 187 8 is_stmt 0 view .LVU127
+ 615 01d0 34E0      		ldi r19,lo8(4)
+ 616 01d2 9312      		cpse r9,r19
+ 617 01d4 00C0      		rjmp .L26
+ 618               	.LBB37:
+ 193:matrix.c      ****         uint8_t buf[8];
+ 619               		.loc 1 193 9 is_stmt 1 view .LVU128
+ 194:matrix.c      ****         len = adb_host_talk_buf(addr, ADB_REG_1, buf, sizeof(buf));
+ 620               		.loc 1 194 9 view .LVU129
+ 195:matrix.c      **** 
+ 621               		.loc 1 195 9 view .LVU130
+ 195:matrix.c      **** 
+ 622               		.loc 1 195 15 is_stmt 0 view .LVU131
+ 623 01d6 28E0      		ldi r18,lo8(8)
+ 624 01d8 AE01      		movw r20,r28
+ 625 01da 4F5F      		subi r20,-1
+ 626 01dc 5F4F      		sbci r21,-1
+ 627 01de 61E0      		ldi r22,lo8(1)
+ 628 01e0 8FE0      		ldi r24,lo8(15)
+ 629 01e2 0E94 0000 		call adb_host_talk_buf
+ 630               	.LVL46:
+ 197:matrix.c      ****             mouse_cpi = (buf[4]<<8) | buf[5];
+ 631               		.loc 1 197 9 is_stmt 1 view .LVU132
+ 197:matrix.c      ****             mouse_cpi = (buf[4]<<8) | buf[5];
+ 632               		.loc 1 197 12 is_stmt 0 view .LVU133
+ 633 01e6 8630      		cpi r24,lo8(6)
+ 634 01e8 00F0      		brlo .L27
+ 198:matrix.c      ****         } else {
+ 635               		.loc 1 198 13 is_stmt 1 view .LVU134
+ 198:matrix.c      ****         } else {
+ 636               		.loc 1 198 23 is_stmt 0 view .LVU135
+ 637 01ea 2D81      		ldd r18,Y+5
+ 638 01ec 3E81      		ldd r19,Y+6
+ 639 01ee 3227      		eor r19,r18
+ 640 01f0 2327      		eor r18,r19
+ 641 01f2 3227      		eor r19,r18
+ 642 01f4 3093 0000 		sts mouse_cpi+1,r19
+ 643 01f8 2093 0000 		sts mouse_cpi,r18
+ 203:matrix.c      ****             xprintf("Ext: [", len);
+ 644               		.loc 1 203 9 is_stmt 1 view .LVU136
+ 645               	.L28:
+ 204:matrix.c      ****             for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 646               		.loc 1 204 13 view .LVU137
+ 647 01fc 882E      		mov r8,r24
+ 648 01fe 912C      		mov r9,__zero_reg__
+ 649               	.LVL47:
+ 204:matrix.c      ****             for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 650               		.loc 1 204 13 is_stmt 0 view .LVU138
+ 651               	.LBE37:
+ 204:matrix.c      ****             for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 652               		.loc 1 204 13 is_stmt 1 view .LVU139
+ 204:matrix.c      ****             for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 653               		.loc 1 204 13 view .LVU140
+ 654               	.LBB38:
+ 655 0200 1F92      		push __zero_reg__
+ 656 0202 8F93      		push r24
+ 657 0204 80E0      		ldi r24,lo8(__c.2319)
+ 658 0206 90E0      		ldi r25,hi8(__c.2319)
+ 659               	.LVL48:
+ 204:matrix.c      ****             for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 660               		.loc 1 204 13 is_stmt 0 view .LVU141
+ 661 0208 9F93      		push r25
+ 662 020a 8F93      		push r24
+ 663 020c 0E94 0000 		call __xprintf
+ 664               	.LVL49:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 665               		.loc 1 205 13 is_stmt 1 view .LVU142
+ 666               	.LBB32:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 667               		.loc 1 205 18 view .LVU143
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 668               		.loc 1 205 13 is_stmt 0 view .LVU144
+ 669 0210 0F90      		pop __tmp_reg__
+ 670 0212 0F90      		pop __tmp_reg__
+ 671 0214 0F90      		pop __tmp_reg__
+ 672 0216 0F90      		pop __tmp_reg__
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 673               		.loc 1 205 25 view .LVU145
+ 674 0218 312C      		mov r3,__zero_reg__
+ 675               	.LVL50:
+ 676               	.L30:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 677               		.loc 1 205 34 view .LVU146
+ 678 021a 832D      		mov r24,r3
+ 679 021c 032C      		mov __tmp_reg__,r3
+ 680 021e 000C      		lsl r0
+ 681 0220 990B      		sbc r25,r25
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 682               		.loc 1 205 13 view .LVU147
+ 683 0222 8815      		cp r24,r8
+ 684 0224 9905      		cpc r25,r9
+ 685 0226 04F0      		brlt .L31
+ 686               	.LBE32:
+ 206:matrix.c      ****         }
+ 687               		.loc 1 206 13 is_stmt 1 view .LVU148
+ 688               	.LBE38:
+ 206:matrix.c      ****         }
+ 689               		.loc 1 206 13 view .LVU149
+ 206:matrix.c      ****         }
+ 690               		.loc 1 206 13 view .LVU150
+ 691               	.LBB39:
+ 692 0228 8091 0000 		lds r24,mouse_cpi+1
+ 693 022c 8F93      		push r24
+ 694 022e 8091 0000 		lds r24,mouse_cpi
+ 695 0232 8F93      		push r24
+ 696 0234 20E0      		ldi r18,lo8(__c.2327)
+ 697 0236 30E0      		ldi r19,hi8(__c.2327)
+ 698 0238 3F93      		push r19
+ 699 023a 2F93      		push r18
+ 700 023c 0E94 0000 		call __xprintf
+ 701               	.LVL51:
+ 702 0240 0F90      		pop __tmp_reg__
+ 703 0242 0F90      		pop __tmp_reg__
+ 704 0244 0F90      		pop __tmp_reg__
+ 705 0246 0F90      		pop __tmp_reg__
+ 706 0248 00C0      		rjmp .L29
+ 707               	.LVL52:
+ 708               	.L27:
+ 200:matrix.c      ****         }
+ 709               		.loc 1 200 13 view .LVU151
+ 200:matrix.c      ****         }
+ 710               		.loc 1 200 23 is_stmt 0 view .LVU152
+ 711 024a F092 0000 		sts mouse_cpi+1,r15
+ 712 024e E092 0000 		sts mouse_cpi,r14
+ 203:matrix.c      ****             xprintf("Ext: [", len);
+ 713               		.loc 1 203 9 is_stmt 1 view .LVU153
+ 203:matrix.c      ****             xprintf("Ext: [", len);
+ 714               		.loc 1 203 12 is_stmt 0 view .LVU154
+ 715 0252 8111      		cpse r24,__zero_reg__
+ 716 0254 00C0      		rjmp .L28
+ 717               	.LVL53:
+ 718               	.L29:
+ 211:matrix.c      ****             xprintf("TM5: default\n");
+ 719               		.loc 1 211 9 is_stmt 1 view .LVU155
+ 211:matrix.c      ****             xprintf("TM5: default\n");
+ 720               		.loc 1 211 12 is_stmt 0 view .LVU156
+ 721 0256 8981      		ldd r24,Y+1
+ 722 0258 8B34      		cpi r24,lo8(75)
+ 723 025a 01F4      		brne .L32
+ 211:matrix.c      ****             xprintf("TM5: default\n");
+ 724               		.loc 1 211 28 view .LVU157
+ 725 025c 8A81      		ldd r24,Y+2
+ 726 025e 8D34      		cpi r24,lo8(77)
+ 727 0260 01F4      		brne .L32
+ 211:matrix.c      ****             xprintf("TM5: default\n");
+ 728               		.loc 1 211 46 view .LVU158
+ 729 0262 8B81      		ldd r24,Y+3
+ 730 0264 8C34      		cpi r24,lo8(76)
+ 731 0266 01F4      		brne .L32
+ 211:matrix.c      ****             xprintf("TM5: default\n");
+ 732               		.loc 1 211 64 view .LVU159
+ 733 0268 8C81      		ldd r24,Y+4
+ 734 026a 8133      		cpi r24,lo8(49)
+ 735 026c 01F4      		brne .L32
+ 212:matrix.c      ****             // Move it to addr0 to remove this device and get new device with handle id 50 on addr 
+ 736               		.loc 1 212 13 is_stmt 1 view .LVU160
+ 737               	.LBE39:
+ 212:matrix.c      ****             // Move it to addr0 to remove this device and get new device with handle id 50 on addr 
+ 738               		.loc 1 212 13 view .LVU161
+ 212:matrix.c      ****             // Move it to addr0 to remove this device and get new device with handle id 50 on addr 
+ 739               		.loc 1 212 13 view .LVU162
+ 740               	.LBB40:
+ 741 026e DF92      		push r13
+ 742 0270 CF92      		push r12
+ 743 0272 0E94 0000 		call __xprintf
+ 744               	.LVL54:
+ 221:matrix.c      ****             adb_host_listen(addr, ADB_REG_3, ((reg3 >> 8) & 0xF0) | ADB_ADDR_0, 0xFE);
+ 745               		.loc 1 221 13 view .LVU163
+ 746 0276 8FE0      		ldi r24,lo8(15)
+ 747 0278 0E94 0000 		call adb_host_flush
+ 748               	.LVL55:
+ 222:matrix.c      ****         } else {
+ 749               		.loc 1 222 13 view .LVU164
+ 750 027c 2EEF      		ldi r18,lo8(-2)
+ 751 027e 412F      		mov r20,r17
+ 752 0280 407F      		andi r20,lo8(-16)
+ 753 0282 63E0      		ldi r22,lo8(3)
+ 754 0284 8FE0      		ldi r24,lo8(15)
+ 755 0286 0E94 0000 		call adb_host_listen
+ 756               	.LVL56:
+ 757 028a 00C0      		rjmp .L54
+ 758               	.LVL57:
+ 759               	.L31:
+ 760               	.LBB33:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 761               		.loc 1 205 46 view .LVU165
+ 762               	.LBE33:
+ 763               	.LBE40:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 764               		.loc 1 205 46 view .LVU166
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 765               		.loc 1 205 46 view .LVU167
+ 766               	.LBB41:
+ 767               	.LBB34:
+ 768 028c 21E0      		ldi r18,lo8(1)
+ 769 028e 30E0      		ldi r19,0
+ 770 0290 2C0F      		add r18,r28
+ 771 0292 3D1F      		adc r19,r29
+ 772 0294 820F      		add r24,r18
+ 773 0296 931F      		adc r25,r19
+ 774 0298 FC01      		movw r30,r24
+ 775 029a 8081      		ld r24,Z
+ 776 029c 1F92      		push __zero_reg__
+ 777 029e 8F93      		push r24
+ 778 02a0 BF92      		push r11
+ 779 02a2 AF92      		push r10
+ 780 02a4 0E94 0000 		call __xprintf
+ 781               	.LVL58:
+ 782 02a8 3394      		inc r3
+ 783               	.LVL59:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 784               		.loc 1 205 46 is_stmt 0 view .LVU168
+ 785 02aa 0F90      		pop __tmp_reg__
+ 786 02ac 0F90      		pop __tmp_reg__
+ 787 02ae 0F90      		pop __tmp_reg__
+ 788 02b0 0F90      		pop __tmp_reg__
+ 789 02b2 00C0      		rjmp .L30
+ 790               	.LVL60:
+ 791               	.L32:
+ 205:matrix.c      ****             xprintf("] cpi=%d\n", mouse_cpi);
+ 792               		.loc 1 205 46 view .LVU169
+ 793               	.LBE34:
+ 224:matrix.c      ****         }
+ 794               		.loc 1 224 13 is_stmt 1 view .LVU170
+ 795               	.LBE41:
+ 224:matrix.c      ****         }
+ 796               		.loc 1 224 13 view .LVU171
+ 224:matrix.c      ****         }
+ 797               		.loc 1 224 13 view .LVU172
+ 798               	.LBB42:
+ 799 02b4 7F92      		push r7
+ 800 02b6 6F92      		push r6
+ 801 02b8 0E94 0000 		call __xprintf
+ 802               	.LVL61:
+ 803 02bc 00C0      		rjmp .L54
+ 804               	.LVL62:
+ 805               	.L26:
+ 224:matrix.c      ****         }
+ 806               		.loc 1 224 13 is_stmt 0 view .LVU173
+ 807               	.LBE42:
+ 228:matrix.c      ****         xprintf("TM5: ext\n");
+ 808               		.loc 1 228 5 is_stmt 1 view .LVU174
+ 228:matrix.c      ****         xprintf("TM5: ext\n");
+ 809               		.loc 1 228 8 is_stmt 0 view .LVU175
+ 810 02be 92E3      		ldi r25,lo8(50)
+ 811 02c0 9912      		cpse r9,r25
+ 812 02c2 00C0      		rjmp .L25
+ 813               	.LBB43:
+ 229:matrix.c      **** 
+ 814               		.loc 1 229 9 is_stmt 1 view .LVU176
+ 815               	.LBE43:
+ 229:matrix.c      **** 
+ 816               		.loc 1 229 9 view .LVU177
+ 229:matrix.c      **** 
+ 817               		.loc 1 229 9 view .LVU178
+ 818               	.LBB44:
+ 819 02c4 5F92      		push r5
+ 820 02c6 4F92      		push r4
+ 821 02c8 0E94 0000 		call __xprintf
+ 822               	.LVL63:
+ 234:matrix.c      ****         static uint8_t cmd2[] = { 0xA5, 0x14, 0x00, 0x00, 0x69, 0xFF, 0xFF, 0x27 };
+ 823               		.loc 1 234 9 view .LVU179
+ 235:matrix.c      **** 
+ 824               		.loc 1 235 9 view .LVU180
+ 237:matrix.c      ****         adb_host_listen_buf(addr, ADB_REG_2, cmd1, sizeof(cmd1));
+ 825               		.loc 1 237 9 view .LVU181
+ 826 02cc 8FE0      		ldi r24,lo8(15)
+ 827 02ce 0E94 0000 		call adb_host_flush
+ 828               	.LVL64:
+ 238:matrix.c      ****         adb_host_flush(addr);
+ 829               		.loc 1 238 9 view .LVU182
+ 830 02d2 28E0      		ldi r18,lo8(8)
+ 831 02d4 40E0      		ldi r20,lo8(cmd1.2335)
+ 832 02d6 50E0      		ldi r21,hi8(cmd1.2335)
+ 833 02d8 62E0      		ldi r22,lo8(2)
+ 834 02da 8FE0      		ldi r24,lo8(15)
+ 835 02dc 0E94 0000 		call adb_host_listen_buf
+ 836               	.LVL65:
+ 239:matrix.c      ****         adb_host_listen_buf(addr, ADB_REG_2, cmd2, sizeof(cmd2));
+ 837               		.loc 1 239 9 view .LVU183
+ 838 02e0 8FE0      		ldi r24,lo8(15)
+ 839 02e2 0E94 0000 		call adb_host_flush
+ 840               	.LVL66:
+ 240:matrix.c      ****     }
+ 841               		.loc 1 240 9 view .LVU184
+ 842 02e6 28E0      		ldi r18,lo8(8)
+ 843 02e8 40E0      		ldi r20,lo8(cmd2.2336)
+ 844 02ea 50E0      		ldi r21,hi8(cmd2.2336)
+ 845 02ec 62E0      		ldi r22,lo8(2)
+ 846 02ee 8FE0      		ldi r24,lo8(15)
+ 847 02f0 0E94 0000 		call adb_host_listen_buf
+ 848               	.LVL67:
+ 849 02f4 00C0      		rjmp .L54
+ 850               	.LVL68:
+ 851               	.L53:
+ 852               	/* epilogue start */
+ 240:matrix.c      ****     }
+ 853               		.loc 1 240 9 is_stmt 0 view .LVU185
+ 854               	.LBE44:
+ 259:matrix.c      **** 
+ 855               		.loc 1 259 1 view .LVU186
+ 856 02f6 2896      		adiw r28,8
+ 857 02f8 0FB6      		in __tmp_reg__,__SREG__
+ 858 02fa F894      		cli
+ 859 02fc DEBF      		out __SP_H__,r29
+ 860 02fe 0FBE      		out __SREG__,__tmp_reg__
+ 861 0300 CDBF      		out __SP_L__,r28
+ 862 0302 DF91      		pop r29
+ 863 0304 CF91      		pop r28
+ 864 0306 1F91      		pop r17
+ 865 0308 0F91      		pop r16
+ 866               	.LVL69:
+ 259:matrix.c      **** 
+ 867               		.loc 1 259 1 view .LVU187
+ 868 030a FF90      		pop r15
+ 869 030c EF90      		pop r14
+ 870 030e DF90      		pop r13
+ 871 0310 CF90      		pop r12
+ 872 0312 BF90      		pop r11
+ 873 0314 AF90      		pop r10
+ 874 0316 9F90      		pop r9
+ 875 0318 8F90      		pop r8
+ 876 031a 7F90      		pop r7
+ 877 031c 6F90      		pop r6
+ 878 031e 5F90      		pop r5
+ 879 0320 4F90      		pop r4
+ 880 0322 3F90      		pop r3
+ 881 0324 0895      		ret
+ 882               		.cfi_endproc
+ 883               	.LFE15:
+ 885               		.section	.text.adb_mouse_task,"ax",@progbits
+ 886               	.global	adb_mouse_task
+ 888               	adb_mouse_task:
+ 889               	.LFB10:
+ 269:matrix.c      ****     uint8_t len;
+ 890               		.loc 1 269 1 is_stmt 1 view -0
+ 891               		.cfi_startproc
+ 892 0000 9F92      		push r9
+ 893               	.LCFI33:
+ 894               		.cfi_def_cfa_offset 3
+ 895               		.cfi_offset 9, -2
+ 896 0002 AF92      		push r10
+ 897               	.LCFI34:
+ 898               		.cfi_def_cfa_offset 4
+ 899               		.cfi_offset 10, -3
+ 900 0004 BF92      		push r11
+ 901               	.LCFI35:
+ 902               		.cfi_def_cfa_offset 5
+ 903               		.cfi_offset 11, -4
+ 904 0006 CF92      		push r12
+ 905               	.LCFI36:
+ 906               		.cfi_def_cfa_offset 6
+ 907               		.cfi_offset 12, -5
+ 908 0008 DF92      		push r13
+ 909               	.LCFI37:
+ 910               		.cfi_def_cfa_offset 7
+ 911               		.cfi_offset 13, -6
+ 912 000a EF92      		push r14
+ 913               	.LCFI38:
+ 914               		.cfi_def_cfa_offset 8
+ 915               		.cfi_offset 14, -7
+ 916 000c FF92      		push r15
+ 917               	.LCFI39:
+ 918               		.cfi_def_cfa_offset 9
+ 919               		.cfi_offset 15, -8
+ 920 000e 0F93      		push r16
+ 921               	.LCFI40:
+ 922               		.cfi_def_cfa_offset 10
+ 923               		.cfi_offset 16, -9
+ 924 0010 1F93      		push r17
+ 925               	.LCFI41:
+ 926               		.cfi_def_cfa_offset 11
+ 927               		.cfi_offset 17, -10
+ 928 0012 CF93      		push r28
+ 929               	.LCFI42:
+ 930               		.cfi_def_cfa_offset 12
+ 931               		.cfi_offset 28, -11
+ 932 0014 DF93      		push r29
+ 933               	.LCFI43:
+ 934               		.cfi_def_cfa_offset 13
+ 935               		.cfi_offset 29, -12
+ 936 0016 00D0      		rcall .
+ 937 0018 00D0      		rcall .
+ 938 001a 0F92      		push __tmp_reg__
+ 939               	.LCFI44:
+ 940               		.cfi_def_cfa_offset 18
+ 941 001c CDB7      		in r28,__SP_L__
+ 942 001e DEB7      		in r29,__SP_H__
+ 943               	.LCFI45:
+ 944               		.cfi_def_cfa_register 28
+ 945               	/* prologue: function */
+ 946               	/* frame size = 5 */
+ 947               	/* stack size = 16 */
+ 948               	.L__stack_usage = 16
+ 270:matrix.c      ****     uint8_t buf[5];
+ 949               		.loc 1 270 5 view .LVU189
+ 271:matrix.c      ****     int16_t x, y;
+ 950               		.loc 1 271 5 view .LVU190
+ 272:matrix.c      ****     static int8_t mouseacc;
+ 951               		.loc 1 272 5 view .LVU191
+ 273:matrix.c      **** 
+ 952               		.loc 1 273 5 view .LVU192
+ 276:matrix.c      **** 
+ 953               		.loc 1 276 5 view .LVU193
+ 279:matrix.c      ****     tick_ms = timer_read();
+ 954               		.loc 1 279 5 view .LVU194
+ 279:matrix.c      ****     tick_ms = timer_read();
+ 955               		.loc 1 279 9 is_stmt 0 view .LVU195
+ 956 0020 8091 0000 		lds r24,tick_ms.2348
+ 957 0024 9091 0000 		lds r25,tick_ms.2348+1
+ 958 0028 0E94 0000 		call timer_elapsed
+ 959               	.LVL70:
+ 279:matrix.c      ****     tick_ms = timer_read();
+ 960               		.loc 1 279 8 view .LVU196
+ 961 002c 0C97      		sbiw r24,12
+ 962 002e 00F4      		brsh .+2
+ 963 0030 00C0      		rjmp .L55
+ 280:matrix.c      **** 
+ 964               		.loc 1 280 5 is_stmt 1 view .LVU197
+ 280:matrix.c      **** 
+ 965               		.loc 1 280 15 is_stmt 0 view .LVU198
+ 966 0032 0E94 0000 		call timer_read
+ 967               	.LVL71:
+ 280:matrix.c      **** 
+ 968               		.loc 1 280 13 view .LVU199
+ 969 0036 9093 0000 		sts tick_ms.2348+1,r25
+ 970 003a 8093 0000 		sts tick_ms.2348,r24
+ 282:matrix.c      ****     if (timer_elapsed(detect_ms) > 1000) {
+ 971               		.loc 1 282 5 is_stmt 1 view .LVU200
+ 283:matrix.c      ****         detect_ms = timer_read();
+ 972               		.loc 1 283 5 view .LVU201
+ 283:matrix.c      ****         detect_ms = timer_read();
+ 973               		.loc 1 283 9 is_stmt 0 view .LVU202
+ 974 003e 8091 0000 		lds r24,detect_ms.2349
+ 975 0042 9091 0000 		lds r25,detect_ms.2349+1
+ 976 0046 0E94 0000 		call timer_elapsed
+ 977               	.LVL72:
+ 283:matrix.c      ****         detect_ms = timer_read();
+ 978               		.loc 1 283 8 view .LVU203
+ 979 004a 893E      		cpi r24,-23
+ 980 004c 9340      		sbci r25,3
+ 981 004e 00F0      		brlo .L57
+ 284:matrix.c      ****         // check new device on addr3
+ 982               		.loc 1 284 9 is_stmt 1 view .LVU204
+ 284:matrix.c      ****         // check new device on addr3
+ 983               		.loc 1 284 21 is_stmt 0 view .LVU205
+ 984 0050 0E94 0000 		call timer_read
+ 985               	.LVL73:
+ 284:matrix.c      ****         // check new device on addr3
+ 986               		.loc 1 284 19 view .LVU206
+ 987 0054 9093 0000 		sts detect_ms.2349+1,r25
+ 988 0058 8093 0000 		sts detect_ms.2349,r24
+ 286:matrix.c      ****     }
+ 989               		.loc 1 286 9 is_stmt 1 view .LVU207
+ 990 005c 0E94 0000 		call mouse_init.constprop.0
+ 991               	.LVL74:
+ 992               	.L57:
+ 301:matrix.c      **** 
+ 993               		.loc 1 301 5 view .LVU208
+ 301:matrix.c      **** 
+ 994               		.loc 1 301 11 is_stmt 0 view .LVU209
+ 995 0060 25E0      		ldi r18,lo8(5)
+ 996 0062 AE01      		movw r20,r28
+ 997 0064 4F5F      		subi r20,-1
+ 998 0066 5F4F      		sbci r21,-1
+ 999 0068 60E0      		ldi r22,0
+ 1000 006a 8AE0      		ldi r24,lo8(10)
+ 1001 006c 0E94 0000 		call adb_host_talk_buf
+ 1002               	.LVL75:
+ 1003 0070 A82E      		mov r10,r24
+ 1004               	.LVL76:
+ 304:matrix.c      ****         mouseacc = 1;
+ 1005               		.loc 1 304 5 is_stmt 1 view .LVU210
+ 304:matrix.c      ****         mouseacc = 1;
+ 1006               		.loc 1 304 8 is_stmt 0 view .LVU211
+ 1007 0072 31E0      		ldi r19,lo8(1)
+ 305:matrix.c      ****         return;
+ 1008               		.loc 1 305 18 view .LVU212
+ 1009 0074 81E0      		ldi r24,lo8(1)
+ 304:matrix.c      ****         mouseacc = 1;
+ 1010               		.loc 1 304 8 view .LVU213
+ 1011 0076 3A15      		cp r19,r10
+ 1012 0078 00F0      		brlo .+2
+ 1013 007a 00C0      		rjmp .L93
+ 307:matrix.c      **** 
+ 1014               		.loc 1 307 6 is_stmt 1 view .LVU214
+ 310:matrix.c      ****     bool yneg = false;
+ 1015               		.loc 1 310 5 view .LVU215
+ 1016               	.LVL77:
+ 311:matrix.c      ****     if (len == 2) {
+ 1017               		.loc 1 311 5 view .LVU216
+ 312:matrix.c      ****         if (buf[0] & 0x40) yneg = true;
+ 1018               		.loc 1 312 5 view .LVU217
+ 1019 007c B981      		ldd r27,Y+1
+ 1020 007e AA81      		ldd r26,Y+2
+ 312:matrix.c      ****         if (buf[0] & 0x40) yneg = true;
+ 1021               		.loc 1 312 8 is_stmt 0 view .LVU218
+ 1022 0080 42E0      		ldi r20,lo8(2)
+ 1023 0082 A412      		cpse r10,r20
+ 1024 0084 00C0      		rjmp .L59
+ 313:matrix.c      ****         if (buf[1] & 0x40) xneg = true;
+ 1025               		.loc 1 313 9 is_stmt 1 view .LVU219
+ 313:matrix.c      ****         if (buf[1] & 0x40) xneg = true;
+ 1026               		.loc 1 313 12 is_stmt 0 view .LVU220
+ 1027 0086 B6FB      		bst r27,6
+ 1028 0088 4427      		clr r20
+ 1029 008a 40F9      		bld r20,0
+ 1030               	.LVL78:
+ 314:matrix.c      ****     } else {
+ 1031               		.loc 1 314 9 is_stmt 1 view .LVU221
+ 314:matrix.c      ****     } else {
+ 1032               		.loc 1 314 12 is_stmt 0 view .LVU222
+ 1033 008c A6FB      		bst r26,6
+ 1034 008e 2227      		clr r18
+ 1035 0090 20F9      		bld r18,0
+ 1036               	.L60:
+ 1037               	.LVL79:
+ 320:matrix.c      ****         buf[i] = 0x88;
+ 1038               		.loc 1 320 5 is_stmt 1 view .LVU223
+ 1039               	.LBB45:
+ 320:matrix.c      ****         buf[i] = 0x88;
+ 1040               		.loc 1 320 10 view .LVU224
+ 320:matrix.c      ****         buf[i] = 0x88;
+ 1041               		.loc 1 320 17 is_stmt 0 view .LVU225
+ 1042 0092 3A2D      		mov r19,r10
+ 1043               	.LVL80:
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1044               		.loc 1 322 26 view .LVU226
+ 1045 0094 58EF      		ldi r21,lo8(-8)
+ 321:matrix.c      ****         if (yneg) buf[i] |= 0x70;
+ 1046               		.loc 1 321 16 view .LVU227
+ 1047 0096 68E8      		ldi r22,lo8(-120)
+ 1048               	.L61:
+ 320:matrix.c      ****         buf[i] = 0x88;
+ 1049               		.loc 1 320 5 discriminator 1 view .LVU228
+ 1050 0098 3530      		cpi r19,lo8(5)
+ 1051 009a 00F4      		brsh .+2
+ 1052 009c 00C0      		rjmp .L65
+ 320:matrix.c      ****         buf[i] = 0x88;
+ 1053               		.loc 1 320 5 discriminator 1 view .LVU229
+ 1054               	.LBE45:
+ 328:matrix.c      ****     if (!(buf[4] & 0x08)) buttons |= MOUSE_BTN8;
+ 1055               		.loc 1 328 5 is_stmt 1 view .LVU230
+ 1056               	.LVL81:
+ 329:matrix.c      ****     if (!(buf[4] & 0x80)) buttons |= MOUSE_BTN7;
+ 1057               		.loc 1 329 5 view .LVU231
+ 329:matrix.c      ****     if (!(buf[4] & 0x80)) buttons |= MOUSE_BTN7;
+ 1058               		.loc 1 329 14 is_stmt 0 view .LVU232
+ 1059 009e 8D81      		ldd r24,Y+5
+ 329:matrix.c      ****     if (!(buf[4] & 0x80)) buttons |= MOUSE_BTN7;
+ 1060               		.loc 1 329 18 view .LVU233
+ 1061 00a0 082F      		mov r16,r24
+ 1062 00a2 10E0      		ldi r17,0
+ 329:matrix.c      ****     if (!(buf[4] & 0x80)) buttons |= MOUSE_BTN7;
+ 1063               		.loc 1 329 35 view .LVU234
+ 1064 00a4 90E8      		ldi r25,lo8(-128)
+ 329:matrix.c      ****     if (!(buf[4] & 0x80)) buttons |= MOUSE_BTN7;
+ 1065               		.loc 1 329 8 view .LVU235
+ 1066 00a6 83FD      		sbrc r24,3
+ 328:matrix.c      ****     if (!(buf[4] & 0x08)) buttons |= MOUSE_BTN8;
+ 1067               		.loc 1 328 13 view .LVU236
+ 1068 00a8 90E0      		ldi r25,0
+ 1069               	.L66:
+ 1070               	.LVL82:
+ 330:matrix.c      ****     if (!(buf[3] & 0x08)) buttons |= MOUSE_BTN6;
+ 1071               		.loc 1 330 5 is_stmt 1 view .LVU237
+ 330:matrix.c      ****     if (!(buf[3] & 0x08)) buttons |= MOUSE_BTN6;
+ 1072               		.loc 1 330 8 is_stmt 0 view .LVU238
+ 1073 00aa 87FF      		sbrs r24,7
+ 330:matrix.c      ****     if (!(buf[3] & 0x08)) buttons |= MOUSE_BTN6;
+ 1074               		.loc 1 330 27 is_stmt 1 discriminator 1 view .LVU239
+ 330:matrix.c      ****     if (!(buf[3] & 0x08)) buttons |= MOUSE_BTN6;
+ 1075               		.loc 1 330 35 is_stmt 0 discriminator 1 view .LVU240
+ 1076 00ac 9064      		ori r25,lo8(64)
+ 1077               	.LVL83:
+ 1078               	.L67:
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1079               		.loc 1 331 5 is_stmt 1 view .LVU241
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1080               		.loc 1 331 14 is_stmt 0 view .LVU242
+ 1081 00ae 8C81      		ldd r24,Y+4
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1082               		.loc 1 331 18 view .LVU243
+ 1083 00b0 482F      		mov r20,r24
+ 1084               	.LVL84:
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1085               		.loc 1 331 18 view .LVU244
+ 1086 00b2 50E0      		ldi r21,0
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1087               		.loc 1 331 8 view .LVU245
+ 1088 00b4 83FF      		sbrs r24,3
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1089               		.loc 1 331 27 is_stmt 1 discriminator 1 view .LVU246
+ 331:matrix.c      ****     if (!(buf[3] & 0x80)) buttons |= MOUSE_BTN5;
+ 1090               		.loc 1 331 35 is_stmt 0 discriminator 1 view .LVU247
+ 1091 00b6 9062      		ori r25,lo8(32)
+ 1092               	.LVL85:
+ 1093               	.L68:
+ 332:matrix.c      ****     if (!(buf[2] & 0x08)) buttons |= MOUSE_BTN4;
+ 1094               		.loc 1 332 5 is_stmt 1 view .LVU248
+ 332:matrix.c      ****     if (!(buf[2] & 0x08)) buttons |= MOUSE_BTN4;
+ 1095               		.loc 1 332 8 is_stmt 0 view .LVU249
+ 1096 00b8 87FF      		sbrs r24,7
+ 332:matrix.c      ****     if (!(buf[2] & 0x08)) buttons |= MOUSE_BTN4;
+ 1097               		.loc 1 332 27 is_stmt 1 discriminator 1 view .LVU250
+ 332:matrix.c      ****     if (!(buf[2] & 0x08)) buttons |= MOUSE_BTN4;
+ 1098               		.loc 1 332 35 is_stmt 0 discriminator 1 view .LVU251
+ 1099 00ba 9061      		ori r25,lo8(16)
+ 1100               	.LVL86:
+ 1101               	.L69:
+ 333:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 1102               		.loc 1 333 5 is_stmt 1 view .LVU252
+ 333:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 1103               		.loc 1 333 14 is_stmt 0 view .LVU253
+ 1104 00bc 8B81      		ldd r24,Y+3
+ 333:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 1105               		.loc 1 333 18 view .LVU254
+ 1106 00be 682F      		mov r22,r24
+ 1107 00c0 70E0      		ldi r23,0
+ 333:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 1108               		.loc 1 333 8 view .LVU255
+ 1109 00c2 83FF      		sbrs r24,3
+ 333:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 1110               		.loc 1 333 27 is_stmt 1 discriminator 1 view .LVU256
+ 333:matrix.c      ****     if (!(buf[2] & 0x80)) buttons |= MOUSE_BTN3;
+ 1111               		.loc 1 333 35 is_stmt 0 discriminator 1 view .LVU257
+ 1112 00c4 9860      		ori r25,lo8(8)
+ 1113               	.LVL87:
+ 1114               	.L70:
+ 334:matrix.c      ****     if (!(buf[1] & 0x80)) buttons |= MOUSE_BTN2;
+ 1115               		.loc 1 334 5 is_stmt 1 view .LVU258
+ 334:matrix.c      ****     if (!(buf[1] & 0x80)) buttons |= MOUSE_BTN2;
+ 1116               		.loc 1 334 8 is_stmt 0 view .LVU259
+ 1117 00c6 87FF      		sbrs r24,7
+ 334:matrix.c      ****     if (!(buf[1] & 0x80)) buttons |= MOUSE_BTN2;
+ 1118               		.loc 1 334 27 is_stmt 1 discriminator 1 view .LVU260
+ 334:matrix.c      ****     if (!(buf[1] & 0x80)) buttons |= MOUSE_BTN2;
+ 1119               		.loc 1 334 35 is_stmt 0 discriminator 1 view .LVU261
+ 1120 00c8 9460      		ori r25,lo8(4)
+ 1121               	.LVL88:
+ 1122               	.L71:
+ 335:matrix.c      ****     if (!(buf[0] & 0x80)) buttons |= MOUSE_BTN1;
+ 1123               		.loc 1 335 5 is_stmt 1 view .LVU262
+ 335:matrix.c      ****     if (!(buf[0] & 0x80)) buttons |= MOUSE_BTN1;
+ 1124               		.loc 1 335 8 is_stmt 0 view .LVU263
+ 1125 00ca A7FF      		sbrs r26,7
+ 335:matrix.c      ****     if (!(buf[0] & 0x80)) buttons |= MOUSE_BTN1;
+ 1126               		.loc 1 335 27 is_stmt 1 discriminator 1 view .LVU264
+ 335:matrix.c      ****     if (!(buf[0] & 0x80)) buttons |= MOUSE_BTN1;
+ 1127               		.loc 1 335 35 is_stmt 0 discriminator 1 view .LVU265
+ 1128 00cc 9260      		ori r25,lo8(2)
+ 1129               	.LVL89:
+ 1130               	.L72:
+ 336:matrix.c      ****     mouse_report.buttons = buttons;
+ 1131               		.loc 1 336 5 is_stmt 1 view .LVU266
+ 336:matrix.c      ****     mouse_report.buttons = buttons;
+ 1132               		.loc 1 336 8 is_stmt 0 view .LVU267
+ 1133 00ce B7FF      		sbrs r27,7
+ 336:matrix.c      ****     mouse_report.buttons = buttons;
+ 1134               		.loc 1 336 27 is_stmt 1 discriminator 1 view .LVU268
+ 336:matrix.c      ****     mouse_report.buttons = buttons;
+ 1135               		.loc 1 336 35 is_stmt 0 discriminator 1 view .LVU269
+ 1136 00d0 9160      		ori r25,lo8(1)
+ 1137               	.LVL90:
+ 1138               	.L73:
+ 337:matrix.c      **** 
+ 1139               		.loc 1 337 5 is_stmt 1 view .LVU270
+ 337:matrix.c      **** 
+ 1140               		.loc 1 337 26 is_stmt 0 view .LVU271
+ 1141 00d2 9093 0000 		sts mouse_report,r25
+ 339:matrix.c      ****     yy = (buf[0] & 0x7F) | (buf[2] & 0x70) << 3 | (buf[3] & 0x70) << 6 | (buf[4] & 0x70) << 9;
+ 1142               		.loc 1 339 5 is_stmt 1 view .LVU272
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1143               		.loc 1 340 5 view .LVU273
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1144               		.loc 1 340 44 is_stmt 0 view .LVU274
+ 1145 00d6 7B01      		movw r14,r22
+ 1146 00d8 93E0      		ldi r25,3
+ 1147               		1:
+ 1148 00da EE0C      		lsl r14
+ 1149 00dc FF1C      		rol r15
+ 1150 00de 9A95      		dec r25
+ 1151 00e0 01F4      		brne 1b
+ 1152               	.LVL91:
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1153               		.loc 1 340 44 view .LVU275
+ 1154 00e2 80E8      		ldi r24,128
+ 1155 00e4 E822      		and r14,r24
+ 1156 00e6 83E0      		ldi r24,3
+ 1157 00e8 F822      		and r15,r24
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1158               		.loc 1 340 67 view .LVU276
+ 1159 00ea CA01      		movw r24,r20
+ 1160 00ec 26E0      		ldi r18,6
+ 1161               		1:
+ 1162 00ee 880F      		lsl r24
+ 1163 00f0 991F      		rol r25
+ 1164 00f2 2A95      		dec r18
+ 1165 00f4 01F4      		brne 1b
+ 1166               	.LVL92:
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1167               		.loc 1 340 67 view .LVU277
+ 1168 00f6 8827      		clr r24
+ 1169 00f8 9C71      		andi r25,28
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1170               		.loc 1 340 49 view .LVU278
+ 1171 00fa E82A      		or r14,r24
+ 1172 00fc F92A      		or r15,r25
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1173               		.loc 1 340 18 view .LVU279
+ 1174 00fe BF77      		andi r27,lo8(127)
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1175               		.loc 1 340 49 view .LVU280
+ 1176 0100 EB2A      		or r14,r27
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1177               		.loc 1 340 90 view .LVU281
+ 1178 0102 C801      		movw r24,r16
+ 1179 0104 982F      		mov r25,r24
+ 1180 0106 8827      		clr r24
+ 1181 0108 990F      		lsl r25
+ 1182               	.LVL93:
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1183               		.loc 1 340 90 view .LVU282
+ 1184 010a 8827      		clr r24
+ 1185 010c 907E      		andi r25,224
+ 340:matrix.c      ****     xx = (buf[1] & 0x7F) | (buf[2] & 0x07) << 7 | (buf[3] & 0x07) << 10 | (buf[4] & 0x07) << 13;
+ 1186               		.loc 1 340 8 view .LVU283
+ 1187 010e E82A      		or r14,r24
+ 1188 0110 F92A      		or r15,r25
+ 1189               	.LVL94:
+ 341:matrix.c      **** 
+ 1190               		.loc 1 341 5 is_stmt 1 view .LVU284
+ 341:matrix.c      **** 
+ 1191               		.loc 1 341 18 is_stmt 0 view .LVU285
+ 1192 0112 AF77      		andi r26,lo8(127)
+ 341:matrix.c      **** 
+ 1193               		.loc 1 341 91 view .LVU286
+ 1194 0114 102F      		mov r17,r16
+ 1195 0116 0027      		clr r16
+ 1196 0118 1295      		swap r17
+ 1197 011a 110F      		lsl r17
+ 1198 011c 107E      		andi r17,0xe0
+ 341:matrix.c      **** 
+ 1199               		.loc 1 341 8 view .LVU287
+ 1200 011e 0A2B      		or r16,r26
+ 341:matrix.c      **** 
+ 1201               		.loc 1 341 44 view .LVU288
+ 1202 0120 7695      		lsr r23
+ 1203 0122 762F      		mov r23,r22
+ 1204 0124 6627      		clr r22
+ 1205 0126 7795      		ror r23
+ 1206 0128 6795      		ror r22
+ 1207 012a 6078      		andi r22,128
+ 1208 012c 7370      		andi r23,3
+ 341:matrix.c      **** 
+ 1209               		.loc 1 341 8 view .LVU289
+ 1210 012e 062B      		or r16,r22
+ 1211 0130 172B      		or r17,r23
+ 341:matrix.c      **** 
+ 1212               		.loc 1 341 67 view .LVU290
+ 1213 0132 542F      		mov r21,r20
+ 1214 0134 4427      		clr r20
+ 1215 0136 550F      		lsl r21
+ 1216 0138 550F      		lsl r21
+ 1217 013a 4427      		clr r20
+ 1218 013c 5C71      		andi r21,28
+ 341:matrix.c      **** 
+ 1219               		.loc 1 341 8 view .LVU291
+ 1220 013e 042B      		or r16,r20
+ 1221 0140 152B      		or r17,r21
+ 1222               	.LVL95:
+ 344:matrix.c      ****     y = yy * mouseacc;
+ 1223               		.loc 1 344 5 is_stmt 1 view .LVU292
+ 344:matrix.c      ****     y = yy * mouseacc;
+ 1224               		.loc 1 344 12 is_stmt 0 view .LVU293
+ 1225 0142 4091 0000 		lds r20,mouseacc.2347
+ 344:matrix.c      ****     y = yy * mouseacc;
+ 1226               		.loc 1 344 7 view .LVU294
+ 1227 0146 4003      		mulsu r20,r16
+ 1228 0148 9001      		movw r18,r0
+ 1229 014a 419F      		mul r20,r17
+ 1230 014c 300D      		add r19,r0
+ 1231 014e 1124      		clr __zero_reg__
+ 1232               	.LVL96:
+ 345:matrix.c      **** 
+ 1233               		.loc 1 345 5 is_stmt 1 view .LVU295
+ 345:matrix.c      **** 
+ 1234               		.loc 1 345 7 is_stmt 0 view .LVU296
+ 1235 0150 B701      		movw r22,r14
+ 1236 0152 4603      		mulsu r20,r22
+ 1237 0154 C001      		movw r24,r0
+ 1238 0156 479F      		mul r20,r23
+ 1239 0158 900D      		add r25,r0
+ 1240 015a 1124      		clr __zero_reg__
+ 1241               	.LVL97:
+ 351:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 1242               		.loc 1 351 5 is_stmt 1 view .LVU297
+ 351:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 1243               		.loc 1 351 20 is_stmt 0 view .LVU298
+ 1244 015c 2F37      		cpi r18,127
+ 1245 015e 3105      		cpc r19,__zero_reg__
+ 1246 0160 04F0      		brlt .+2
+ 1247 0162 00C0      		rjmp .L84
+ 351:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 1248               		.loc 1 351 23 discriminator 1 view .LVU299
+ 1249 0164 2138      		cpi r18,-127
+ 1250 0166 7FEF      		ldi r23,-1
+ 1251 0168 3707      		cpc r19,r23
+ 1252 016a 04F4      		brge .L74
+ 1253 016c 21E8      		ldi r18,lo8(-127)
+ 1254 016e 3FEF      		ldi r19,lo8(-1)
+ 1255               	.LVL98:
+ 1256               	.L74:
+ 351:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 1257               		.loc 1 351 20 discriminator 4 view .LVU300
+ 1258 0170 2093 0000 		sts mouse_report+1,r18
+ 352:matrix.c      **** 
+ 1259               		.loc 1 352 5 is_stmt 1 discriminator 4 view .LVU301
+ 352:matrix.c      **** 
+ 1260               		.loc 1 352 20 is_stmt 0 discriminator 4 view .LVU302
+ 1261 0174 8F37      		cpi r24,127
+ 1262 0176 9105      		cpc r25,__zero_reg__
+ 1263 0178 04F0      		brlt .+2
+ 1264 017a 00C0      		rjmp .L85
+ 352:matrix.c      **** 
+ 1265               		.loc 1 352 23 discriminator 1 view .LVU303
+ 1266 017c 8138      		cpi r24,-127
+ 1267 017e EFEF      		ldi r30,-1
+ 1268 0180 9E07      		cpc r25,r30
+ 1269 0182 04F4      		brge .L76
+ 1270 0184 81E8      		ldi r24,lo8(-127)
+ 1271 0186 9FEF      		ldi r25,lo8(-1)
+ 1272               	.LVL99:
+ 1273               	.L76:
+ 352:matrix.c      **** 
+ 1274               		.loc 1 352 20 discriminator 4 view .LVU304
+ 1275 0188 8093 0000 		sts mouse_report+2,r24
+ 354:matrix.c      ****         xprintf("Mouse: [");
+ 1276               		.loc 1 354 5 is_stmt 1 discriminator 4 view .LVU305
+ 354:matrix.c      ****         xprintf("Mouse: [");
+ 1277               		.loc 1 354 9 is_stmt 0 discriminator 4 view .LVU306
+ 1278 018c 8091 0000 		lds r24,debug_config
+ 354:matrix.c      ****         xprintf("Mouse: [");
+ 1279               		.loc 1 354 8 discriminator 4 view .LVU307
+ 1280 0190 83FF      		sbrs r24,3
+ 1281 0192 00C0      		rjmp .L78
+ 355:matrix.c      ****         for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 1282               		.loc 1 355 9 is_stmt 1 view .LVU308
+ 1283               	.LBB46:
+ 355:matrix.c      ****         for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 1284               		.loc 1 355 9 view .LVU309
+ 355:matrix.c      ****         for (int8_t i = 0; i < len; i++) xprintf("%02X ", buf[i]);
+ 1285               		.loc 1 355 9 view .LVU310
+ 1286               	.LBE46:
+ 1287 0194 80E0      		ldi r24,lo8(__c.2359)
+ 1288 0196 90E0      		ldi r25,hi8(__c.2359)
+ 1289 0198 9F93      		push r25
+ 1290 019a 8F93      		push r24
+ 1291 019c 0E94 0000 		call __xprintf
+ 1292               	.LVL100:
+ 356:matrix.c      ****         xprintf("] ");
+ 1293               		.loc 1 356 9 view .LVU311
+ 1294               	.LBB47:
+ 356:matrix.c      ****         xprintf("] ");
+ 1295               		.loc 1 356 14 view .LVU312
+ 356:matrix.c      ****         xprintf("] ");
+ 1296               		.loc 1 356 9 is_stmt 0 view .LVU313
+ 1297 01a0 0F90      		pop __tmp_reg__
+ 1298 01a2 0F90      		pop __tmp_reg__
+ 356:matrix.c      ****         xprintf("] ");
+ 1299               		.loc 1 356 21 view .LVU314
+ 1300 01a4 912C      		mov r9,__zero_reg__
+ 356:matrix.c      ****         xprintf("] ");
+ 1301               		.loc 1 356 30 view .LVU315
+ 1302 01a6 B12C      		mov r11,__zero_reg__
+ 356:matrix.c      ****         xprintf("] ");
+ 1303               		.loc 1 356 42 view .LVU316
+ 1304 01a8 80E0      		ldi r24,lo8(__c.2362)
+ 1305 01aa C82E      		mov r12,r24
+ 1306 01ac 80E0      		ldi r24,hi8(__c.2362)
+ 1307 01ae D82E      		mov r13,r24
+ 1308               	.LVL101:
+ 1309               	.L79:
+ 356:matrix.c      ****         xprintf("] ");
+ 1310               		.loc 1 356 30 discriminator 1 view .LVU317
+ 1311 01b0 892D      		mov r24,r9
+ 1312 01b2 092C      		mov __tmp_reg__,r9
+ 1313 01b4 000C      		lsl r0
+ 1314 01b6 990B      		sbc r25,r25
+ 356:matrix.c      ****         xprintf("] ");
+ 1315               		.loc 1 356 9 discriminator 1 view .LVU318
+ 1316 01b8 8A15      		cp r24,r10
+ 1317 01ba 9B05      		cpc r25,r11
+ 1318 01bc 04F4      		brge .+2
+ 1319 01be 00C0      		rjmp .L80
+ 1320               	.LBE47:
+ 357:matrix.c      ****         xprintf("[B:%02X, X:%d(%d), Y:%d(%d), A:%d]\n", mouse_report.buttons, mouse_report.x, xx, m
+ 1321               		.loc 1 357 9 is_stmt 1 view .LVU319
+ 1322               	.LBB49:
+ 357:matrix.c      ****         xprintf("[B:%02X, X:%d(%d), Y:%d(%d), A:%d]\n", mouse_report.buttons, mouse_report.x, xx, m
+ 1323               		.loc 1 357 9 view .LVU320
+ 357:matrix.c      ****         xprintf("[B:%02X, X:%d(%d), Y:%d(%d), A:%d]\n", mouse_report.buttons, mouse_report.x, xx, m
+ 1324               		.loc 1 357 9 view .LVU321
+ 1325               	.LBE49:
+ 1326 01c0 80E0      		ldi r24,lo8(__c.2367)
+ 1327 01c2 90E0      		ldi r25,hi8(__c.2367)
+ 1328 01c4 9F93      		push r25
+ 1329 01c6 8F93      		push r24
+ 1330 01c8 0E94 0000 		call __xprintf
+ 1331               	.LVL102:
+ 358:matrix.c      ****     }
+ 1332               		.loc 1 358 9 view .LVU322
+ 1333               	.LBB50:
+ 358:matrix.c      ****     }
+ 1334               		.loc 1 358 9 view .LVU323
+ 358:matrix.c      ****     }
+ 1335               		.loc 1 358 9 view .LVU324
+ 1336               	.LBE50:
+ 1337 01cc 8091 0000 		lds r24,mouseacc.2347
+ 1338 01d0 282F      		mov r18,r24
+ 1339 01d2 082E      		mov __tmp_reg__,r24
+ 1340 01d4 000C      		lsl r0
+ 1341 01d6 330B      		sbc r19,r19
+ 1342 01d8 3F93      		push r19
+ 1343 01da 8F93      		push r24
+ 1344 01dc FF92      		push r15
+ 1345 01de EF92      		push r14
+ 1346 01e0 8091 0000 		lds r24,mouse_report+2
+ 1347 01e4 282F      		mov r18,r24
+ 1348 01e6 082E      		mov __tmp_reg__,r24
+ 1349 01e8 000C      		lsl r0
+ 1350 01ea 330B      		sbc r19,r19
+ 1351 01ec 3F93      		push r19
+ 1352 01ee 8F93      		push r24
+ 1353 01f0 1F93      		push r17
+ 1354 01f2 0F93      		push r16
+ 1355 01f4 8091 0000 		lds r24,mouse_report+1
+ 1356 01f8 282F      		mov r18,r24
+ 1357 01fa 082E      		mov __tmp_reg__,r24
+ 1358 01fc 000C      		lsl r0
+ 1359 01fe 330B      		sbc r19,r19
+ 1360 0200 3F93      		push r19
+ 1361 0202 8F93      		push r24
+ 1362 0204 8091 0000 		lds r24,mouse_report
+ 1363 0208 1F92      		push __zero_reg__
+ 1364 020a 8F93      		push r24
+ 1365 020c 80E0      		ldi r24,lo8(__c.2369)
+ 1366 020e 90E0      		ldi r25,hi8(__c.2369)
+ 1367 0210 9F93      		push r25
+ 1368 0212 8F93      		push r24
+ 1369 0214 0E94 0000 		call __xprintf
+ 1370               	.LVL103:
+ 1371 0218 0FB6      		in __tmp_reg__,__SREG__
+ 1372 021a F894      		cli
+ 1373 021c DEBF      		out __SP_H__,r29
+ 1374 021e 0FBE      		out __SREG__,__tmp_reg__
+ 1375 0220 CDBF      		out __SP_L__,r28
+ 1376               	.LVL104:
+ 1377               	.L78:
+ 362:matrix.c      **** 
+ 1378               		.loc 1 362 5 view .LVU325
+ 1379 0222 80E0      		ldi r24,lo8(mouse_report)
+ 1380 0224 90E0      		ldi r25,hi8(mouse_report)
+ 1381 0226 0E94 0000 		call host_mouse_send
+ 1382               	.LVL105:
+ 366:matrix.c      **** 
+ 1383               		.loc 1 366 5 view .LVU326
+ 366:matrix.c      **** 
+ 1384               		.loc 1 366 92 is_stmt 0 view .LVU327
+ 1385 022a 9091 0000 		lds r25,mouseacc.2347
+ 1386 022e 492F      		mov r20,r25
+ 1387 0230 092E      		mov __tmp_reg__,r25
+ 1388 0232 000C      		lsl r0
+ 1389 0234 550B      		sbc r21,r21
+ 366:matrix.c      **** 
+ 1390               		.loc 1 366 66 view .LVU328
+ 1391 0236 2091 0000 		lds r18,mouse_cpi
+ 1392 023a 3091 0000 		lds r19,mouse_cpi+1
+ 1393 023e 283C      		cpi r18,-56
+ 1394 0240 3105      		cpc r19,__zero_reg__
+ 1395 0242 00F4      		brsh .+2
+ 1396 0244 00C0      		rjmp .L86
+ 1397 0246 24E0      		ldi r18,lo8(4)
+ 1398 0248 30E0      		ldi r19,0
+ 1399               	.L81:
+ 366:matrix.c      **** 
+ 1400               		.loc 1 366 92 discriminator 4 view .LVU329
+ 1401 024a 81E0      		ldi r24,lo8(1)
+ 1402 024c 4217      		cp r20,r18
+ 1403 024e 5307      		cpc r21,r19
+ 1404 0250 04F0      		brlt .L82
+ 1405 0252 80E0      		ldi r24,0
+ 1406               	.L82:
+ 366:matrix.c      **** 
+ 1407               		.loc 1 366 14 discriminator 4 view .LVU330
+ 1408 0254 890F      		add r24,r25
+ 1409               	.LVL106:
+ 1410               	.L93:
+ 366:matrix.c      **** 
+ 1411               		.loc 1 366 14 discriminator 4 view .LVU331
+ 1412 0256 8093 0000 		sts mouseacc.2347,r24
+ 368:matrix.c      **** }
+ 1413               		.loc 1 368 5 is_stmt 1 discriminator 4 view .LVU332
+ 1414               	.LVL107:
+ 1415               	.L55:
+ 1416               	/* epilogue start */
+ 369:matrix.c      **** #endif
+ 1417               		.loc 1 369 1 is_stmt 0 view .LVU333
+ 1418 025a 0F90      		pop __tmp_reg__
+ 1419 025c 0F90      		pop __tmp_reg__
+ 1420 025e 0F90      		pop __tmp_reg__
+ 1421 0260 0F90      		pop __tmp_reg__
+ 1422 0262 0F90      		pop __tmp_reg__
+ 1423 0264 DF91      		pop r29
+ 1424 0266 CF91      		pop r28
+ 1425 0268 1F91      		pop r17
+ 1426 026a 0F91      		pop r16
+ 1427 026c FF90      		pop r15
+ 1428 026e EF90      		pop r14
+ 1429 0270 DF90      		pop r13
+ 1430 0272 CF90      		pop r12
+ 1431 0274 BF90      		pop r11
+ 1432 0276 AF90      		pop r10
+ 1433 0278 9F90      		pop r9
+ 1434 027a 0895      		ret
+ 1435               	.LVL108:
+ 1436               	.L59:
+ 316:matrix.c      ****         if (buf[len - 1] & 0x04) xneg = true;
+ 1437               		.loc 1 316 9 is_stmt 1 view .LVU334
+ 316:matrix.c      ****         if (buf[len - 1] & 0x04) xneg = true;
+ 1438               		.loc 1 316 16 is_stmt 0 view .LVU335
+ 1439 027c FE01      		movw r30,r28
+ 1440 027e EA0D      		add r30,r10
+ 1441 0280 F11D      		adc r31,__zero_reg__
+ 1442 0282 2081      		ld r18,Z
+ 316:matrix.c      ****         if (buf[len - 1] & 0x04) xneg = true;
+ 1443               		.loc 1 316 12 view .LVU336
+ 1444 0284 26FB      		bst r18,6
+ 1445 0286 4427      		clr r20
+ 1446 0288 40F9      		bld r20,0
+ 1447               	.LVL109:
+ 317:matrix.c      ****     }
+ 1448               		.loc 1 317 9 is_stmt 1 view .LVU337
+ 317:matrix.c      ****     }
+ 1449               		.loc 1 317 12 is_stmt 0 view .LVU338
+ 1450 028a 22FB      		bst r18,2
+ 1451 028c 2227      		clr r18
+ 1452 028e 20F9      		bld r18,0
+ 1453 0290 00C0      		rjmp .L60
+ 1454               	.LVL110:
+ 1455               	.L65:
+ 1456               	.LBB51:
+ 321:matrix.c      ****         if (yneg) buf[i] |= 0x70;
+ 1457               		.loc 1 321 9 is_stmt 1 view .LVU339
+ 321:matrix.c      ****         if (yneg) buf[i] |= 0x70;
+ 1458               		.loc 1 321 12 is_stmt 0 view .LVU340
+ 1459 0292 832F      		mov r24,r19
+ 1460 0294 032E      		mov __tmp_reg__,r19
+ 1461 0296 000C      		lsl r0
+ 1462 0298 990B      		sbc r25,r25
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1463               		.loc 1 322 9 is_stmt 1 view .LVU341
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1464               		.loc 1 322 26 is_stmt 0 view .LVU342
+ 1465 029a E1E0      		ldi r30,lo8(1)
+ 1466 029c F0E0      		ldi r31,0
+ 1467 029e EC0F      		add r30,r28
+ 1468 02a0 FD1F      		adc r31,r29
+ 1469 02a2 E80F      		add r30,r24
+ 1470 02a4 F91F      		adc r31,r25
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1471               		.loc 1 322 12 view .LVU343
+ 1472 02a6 4111      		cpse r20,__zero_reg__
+ 1473 02a8 00C0      		rjmp .L62
+ 321:matrix.c      ****         if (yneg) buf[i] |= 0x70;
+ 1474               		.loc 1 321 16 view .LVU344
+ 1475 02aa 6083      		st Z,r22
+ 1476               	.L63:
+ 323:matrix.c      ****     }
+ 1477               		.loc 1 323 9 is_stmt 1 view .LVU345
+ 323:matrix.c      ****     }
+ 1478               		.loc 1 323 12 is_stmt 0 view .LVU346
+ 1479 02ac 2223      		tst r18
+ 1480 02ae 01F0      		breq .L64
+ 323:matrix.c      ****     }
+ 1481               		.loc 1 323 19 is_stmt 1 discriminator 1 view .LVU347
+ 323:matrix.c      ****     }
+ 1482               		.loc 1 323 26 is_stmt 0 discriminator 1 view .LVU348
+ 1483 02b0 E1E0      		ldi r30,lo8(1)
+ 1484 02b2 F0E0      		ldi r31,0
+ 1485 02b4 EC0F      		add r30,r28
+ 1486 02b6 FD1F      		adc r31,r29
+ 1487 02b8 E80F      		add r30,r24
+ 1488 02ba F91F      		adc r31,r25
+ 1489 02bc 8081      		ld r24,Z
+ 1490 02be 8760      		ori r24,lo8(7)
+ 1491 02c0 8083      		st Z,r24
+ 1492               	.L64:
+ 1493 02c2 3F5F      		subi r19,lo8(-(1))
+ 1494               	.LVL111:
+ 323:matrix.c      ****     }
+ 1495               		.loc 1 323 26 discriminator 1 view .LVU349
+ 1496 02c4 00C0      		rjmp .L61
+ 1497               	.L62:
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1498               		.loc 1 322 19 is_stmt 1 discriminator 1 view .LVU350
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1499               		.loc 1 322 26 is_stmt 0 discriminator 1 view .LVU351
+ 1500 02c6 5083      		st Z,r21
+ 1501 02c8 00C0      		rjmp .L63
+ 1502               	.LVL112:
+ 1503               	.L84:
+ 322:matrix.c      ****         if (xneg) buf[i] |= 0x07;
+ 1504               		.loc 1 322 26 discriminator 1 view .LVU352
+ 1505               	.LBE51:
+ 351:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 1506               		.loc 1 351 20 view .LVU353
+ 1507 02ca 2FE7      		ldi r18,lo8(127)
+ 1508               	.LVL113:
+ 351:matrix.c      ****     mouse_report.y = -MAX(-MAX(y, -127), -127);
+ 1509               		.loc 1 351 20 view .LVU354
+ 1510 02cc 00C0      		rjmp .L74
+ 1511               	.L85:
+ 352:matrix.c      **** 
+ 1512               		.loc 1 352 20 view .LVU355
+ 1513 02ce 8FE7      		ldi r24,lo8(127)
+ 1514               	.LVL114:
+ 352:matrix.c      **** 
+ 1515               		.loc 1 352 20 view .LVU356
+ 1516 02d0 00C0      		rjmp .L76
+ 1517               	.LVL115:
+ 1518               	.L80:
+ 1519               	.LBB52:
+ 356:matrix.c      ****         xprintf("] ");
+ 1520               		.loc 1 356 42 is_stmt 1 discriminator 3 view .LVU357
+ 1521               	.LBB48:
+ 356:matrix.c      ****         xprintf("] ");
+ 1522               		.loc 1 356 42 discriminator 3 view .LVU358
+ 356:matrix.c      ****         xprintf("] ");
+ 1523               		.loc 1 356 42 discriminator 3 view .LVU359
+ 1524               	.LBE48:
+ 1525 02d2 21E0      		ldi r18,lo8(1)
+ 1526 02d4 30E0      		ldi r19,0
+ 1527 02d6 2C0F      		add r18,r28
+ 1528 02d8 3D1F      		adc r19,r29
+ 1529 02da 820F      		add r24,r18
+ 1530 02dc 931F      		adc r25,r19
+ 1531 02de FC01      		movw r30,r24
+ 1532 02e0 8081      		ld r24,Z
+ 1533 02e2 1F92      		push __zero_reg__
+ 1534 02e4 8F93      		push r24
+ 1535 02e6 DF92      		push r13
+ 1536 02e8 CF92      		push r12
+ 1537 02ea 0E94 0000 		call __xprintf
+ 1538               	.LVL116:
+ 1539 02ee 9394      		inc r9
+ 1540               	.LVL117:
+ 356:matrix.c      ****         xprintf("] ");
+ 1541               		.loc 1 356 42 is_stmt 0 discriminator 3 view .LVU360
+ 1542 02f0 0F90      		pop __tmp_reg__
+ 1543 02f2 0F90      		pop __tmp_reg__
+ 1544 02f4 0F90      		pop __tmp_reg__
+ 1545 02f6 0F90      		pop __tmp_reg__
+ 1546 02f8 00C0      		rjmp .L79
+ 1547               	.LVL118:
+ 1548               	.L86:
+ 356:matrix.c      ****         xprintf("] ");
+ 1549               		.loc 1 356 42 discriminator 3 view .LVU361
+ 1550               	.LBE52:
+ 366:matrix.c      **** 
+ 1551               		.loc 1 366 66 view .LVU362
+ 1552 02fa 28E0      		ldi r18,lo8(8)
+ 1553 02fc 30E0      		ldi r19,0
+ 1554 02fe 00C0      		rjmp .L81
+ 1555               		.cfi_endproc
+ 1556               	.LFE10:
+ 1558               		.section	.text.matrix_scan,"ax",@progbits
+ 1559               	.global	matrix_scan
+ 1561               	matrix_scan:
+ 1562               	.LFB11:
+ 373:matrix.c      ****     /* extra_key is volatile and more convoluted than necessary because gcc refused
+ 1563               		.loc 1 373 1 is_stmt 1 view -0
+ 1564               		.cfi_startproc
+ 1565 0000 1F93      		push r17
+ 1566               	.LCFI46:
+ 1567               		.cfi_def_cfa_offset 3
+ 1568               		.cfi_offset 17, -2
+ 1569 0002 CF93      		push r28
+ 1570               	.LCFI47:
+ 1571               		.cfi_def_cfa_offset 4
+ 1572               		.cfi_offset 28, -3
+ 1573 0004 DF93      		push r29
+ 1574               	.LCFI48:
+ 1575               		.cfi_def_cfa_offset 5
+ 1576               		.cfi_offset 29, -4
+ 1577               	/* prologue: function */
+ 1578               	/* frame size = 0 */
+ 1579               	/* stack size = 3 */
+ 1580               	.L__stack_usage = 3
+ 380:matrix.c      ****     uint16_t codes;
+ 1581               		.loc 1 380 5 view .LVU364
+ 381:matrix.c      ****     uint8_t key0, key1;
+ 1582               		.loc 1 381 5 view .LVU365
+ 382:matrix.c      **** 
+ 1583               		.loc 1 382 5 view .LVU366
+ 385:matrix.c      **** 
+ 1584               		.loc 1 385 5 view .LVU367
+ 387:matrix.c      ****     extra_key = 0xFFFF;
+ 1585               		.loc 1 387 5 view .LVU368
+ 387:matrix.c      ****     extra_key = 0xFFFF;
+ 1586               		.loc 1 387 11 is_stmt 0 view .LVU369
+ 1587 0006 C091 0000 		lds r28,extra_key.2374
+ 1588 000a D091 0000 		lds r29,extra_key.2374+1
+ 1589               	.LVL119:
+ 388:matrix.c      **** 
+ 1590               		.loc 1 388 5 is_stmt 1 view .LVU370
+ 388:matrix.c      **** 
+ 1591               		.loc 1 388 15 is_stmt 0 view .LVU371
+ 1592 000e 8FEF      		ldi r24,lo8(-1)
+ 1593 0010 9FEF      		ldi r25,lo8(-1)
+ 1594 0012 9093 0000 		sts extra_key.2374+1,r25
+ 1595 0016 8093 0000 		sts extra_key.2374,r24
+ 390:matrix.c      ****     {
+ 1596               		.loc 1 390 5 is_stmt 1 view .LVU372
+ 390:matrix.c      ****     {
+ 1597               		.loc 1 390 8 is_stmt 0 view .LVU373
+ 1598 001a CF3F      		cpi r28,-1
+ 1599 001c DC07      		cpc r29,r28
+ 1600 001e 01F0      		breq .+2
+ 1601 0020 00C0      		rjmp .L95
+ 393:matrix.c      ****         tick_ms = timer_read();
+ 1602               		.loc 1 393 9 is_stmt 1 view .LVU374
+ 393:matrix.c      ****         tick_ms = timer_read();
+ 1603               		.loc 1 393 13 is_stmt 0 view .LVU375
+ 1604 0022 8091 0000 		lds r24,tick_ms.2378
+ 1605 0026 9091 0000 		lds r25,tick_ms.2378+1
+ 1606 002a 0E94 0000 		call timer_elapsed
+ 1607               	.LVL120:
+ 393:matrix.c      ****         tick_ms = timer_read();
+ 1608               		.loc 1 393 12 view .LVU376
+ 1609 002e 0C97      		sbiw r24,12
+ 1610 0030 00F4      		brsh .L96
+ 1611               	.L114:
+ 393:matrix.c      ****         tick_ms = timer_read();
+ 1612               		.loc 1 393 49 view .LVU377
+ 1613 0032 80E0      		ldi r24,0
+ 1614               	.LVL121:
+ 1615               	.L94:
+ 1616               	/* epilogue start */
+ 508:matrix.c      **** 
+ 1617               		.loc 1 508 1 view .LVU378
+ 1618 0034 DF91      		pop r29
+ 1619 0036 CF91      		pop r28
+ 1620 0038 1F91      		pop r17
+ 1621 003a 0895      		ret
+ 1622               	.LVL122:
+ 1623               	.L96:
+ 394:matrix.c      **** 
+ 1624               		.loc 1 394 9 is_stmt 1 view .LVU379
+ 394:matrix.c      **** 
+ 1625               		.loc 1 394 19 is_stmt 0 view .LVU380
+ 1626 003c 0E94 0000 		call timer_read
+ 1627               	.LVL123:
+ 394:matrix.c      **** 
+ 1628               		.loc 1 394 17 view .LVU381
+ 1629 0040 9093 0000 		sts tick_ms.2378+1,r25
+ 1630 0044 8093 0000 		sts tick_ms.2378,r24
+ 396:matrix.c      **** 
+ 1631               		.loc 1 396 9 is_stmt 1 view .LVU382
+ 396:matrix.c      **** 
+ 1632               		.loc 1 396 17 is_stmt 0 view .LVU383
+ 1633 0048 82E0      		ldi r24,lo8(2)
+ 1634 004a 0E94 0000 		call adb_host_kbd_recv
+ 1635               	.LVL124:
+ 1636 004e EC01      		movw r28,r24
+ 1637               	.LVL125:
+ 399:matrix.c      ****                 (codes = adb_host_kbd_recv(ADB_ADDR_APPLIANCE))) {
+ 1638               		.loc 1 399 9 is_stmt 1 view .LVU384
+ 399:matrix.c      ****                 (codes = adb_host_kbd_recv(ADB_ADDR_APPLIANCE))) {
+ 1639               		.loc 1 399 12 is_stmt 0 view .LVU385
+ 1640 0050 892B      		or r24,r25
+ 1641 0052 01F0      		breq .+2
+ 1642 0054 00C0      		rjmp .L95
+ 399:matrix.c      ****                 (codes = adb_host_kbd_recv(ADB_ADDR_APPLIANCE))) {
+ 1643               		.loc 1 399 24 discriminator 1 view .LVU386
+ 1644 0056 8091 0000 		lds r24,has_media_keys
+ 1645               	.LVL126:
+ 399:matrix.c      ****                 (codes = adb_host_kbd_recv(ADB_ADDR_APPLIANCE))) {
+ 1646               		.loc 1 399 24 discriminator 1 view .LVU387
+ 1647 005a 8823      		tst r24
+ 1648 005c 01F4      		brne .+2
+ 1649 005e 00C0      		rjmp .L95
+ 400:matrix.c      ****             // key1
+ 1650               		.loc 1 400 26 discriminator 2 view .LVU388
+ 1651 0060 87E0      		ldi r24,lo8(7)
+ 1652 0062 0E94 0000 		call adb_host_kbd_recv
+ 1653               	.LVL127:
+ 1654 0066 9C01      		movw r18,r24
+ 1655               	.LVL128:
+ 399:matrix.c      ****                 (codes = adb_host_kbd_recv(ADB_ADDR_APPLIANCE))) {
+ 1656               		.loc 1 399 42 discriminator 2 view .LVU389
+ 1657 0068 0097      		sbiw r24,0
+ 1658 006a 01F4      		brne .+2
+ 1659 006c 00C0      		rjmp .L95
+ 402:matrix.c      ****             case 0x00:  // Mic
+ 1660               		.loc 1 402 13 is_stmt 1 view .LVU390
+ 402:matrix.c      ****             case 0x00:  // Mic
+ 1661               		.loc 1 402 27 is_stmt 0 view .LVU391
+ 1662 006e 8F77      		andi r24,127
+ 1663 0070 9927      		clr r25
+ 402:matrix.c      ****             case 0x00:  // Mic
+ 1664               		.loc 1 402 13 view .LVU392
+ 1665 0072 8230      		cpi r24,2
+ 1666 0074 9105      		cpc r25,__zero_reg__
+ 1667 0076 01F0      		breq .L100
+ 1668 0078 00F4      		brsh .L101
+ 1669 007a 0097      		sbiw r24,0
+ 1670 007c 01F0      		breq .L102
+ 1671 007e 0197      		sbiw r24,1
+ 1672 0080 01F0      		breq .L103
+ 1673               	.L104:
+ 418:matrix.c      ****                 return 0x11;
+ 1674               		.loc 1 418 17 is_stmt 1 view .LVU393
+ 1675               	.LBB53:
+ 418:matrix.c      ****                 return 0x11;
+ 1676               		.loc 1 418 17 view .LVU394
+ 418:matrix.c      ****                 return 0x11;
+ 1677               		.loc 1 418 17 view .LVU395
+ 1678               	.LBE53:
+ 1679 0082 80E0      		ldi r24,lo8(__c.2386)
+ 1680 0084 90E0      		ldi r25,hi8(__c.2386)
+ 1681 0086 9F93      		push r25
+ 1682               	.LCFI49:
+ 1683               		.cfi_def_cfa_offset 6
+ 1684 0088 8F93      		push r24
+ 1685               	.LCFI50:
+ 1686               		.cfi_def_cfa_offset 7
+ 1687 008a 0E94 0000 		call __xprintf
+ 1688               	.LVL129:
+ 419:matrix.c      ****             }
+ 1689               		.loc 1 419 17 view .LVU396
+ 419:matrix.c      ****             }
+ 1690               		.loc 1 419 24 is_stmt 0 view .LVU397
+ 1691 008e 0F90      		pop __tmp_reg__
+ 1692 0090 0F90      		pop __tmp_reg__
+ 1693               	.LCFI51:
+ 1694               		.cfi_def_cfa_offset 5
+ 1695 0092 81E1      		ldi r24,lo8(17)
+ 1696 0094 00C0      		rjmp .L94
+ 1697               	.LVL130:
+ 1698               	.L101:
+ 402:matrix.c      ****             case 0x00:  // Mic
+ 1699               		.loc 1 402 13 view .LVU398
+ 1700 0096 8330      		cpi r24,3
+ 1701 0098 9105      		cpc r25,__zero_reg__
+ 1702 009a 01F0      		breq .L105
+ 1703 009c 8F37      		cpi r24,127
+ 1704 009e 9105      		cpc r25,__zero_reg__
+ 1705 00a0 01F4      		brne .L104
+ 1706               	.L106:
+ 422:matrix.c      ****             case 0x00:  // Mic
+ 1707               		.loc 1 422 13 is_stmt 1 view .LVU399
+ 422:matrix.c      ****             case 0x00:  // Mic
+ 1708               		.loc 1 422 28 is_stmt 0 view .LVU400
+ 1709 00a2 832F      		mov r24,r19
+ 1710 00a4 9927      		clr r25
+ 422:matrix.c      ****             case 0x00:  // Mic
+ 1711               		.loc 1 422 34 view .LVU401
+ 1712 00a6 8F77      		andi r24,127
+ 1713 00a8 9927      		clr r25
+ 422:matrix.c      ****             case 0x00:  // Mic
+ 1714               		.loc 1 422 13 view .LVU402
+ 1715 00aa 8230      		cpi r24,2
+ 1716 00ac 9105      		cpc r25,__zero_reg__
+ 1717 00ae 01F4      		brne .+2
+ 1718 00b0 00C0      		rjmp .L107
+ 422:matrix.c      ****             case 0x00:  // Mic
+ 1719               		.loc 1 422 13 view .LVU403
+ 1720 00b2 00F4      		brsh .L108
+ 1721 00b4 0097      		sbiw r24,0
+ 1722 00b6 01F0      		breq .L109
+ 1723 00b8 0197      		sbiw r24,1
+ 1724 00ba 01F4      		brne .+2
+ 1725 00bc 00C0      		rjmp .L110
+ 1726               	.L111:
+ 436:matrix.c      ****                 return 0x10;
+ 1727               		.loc 1 436 17 is_stmt 1 view .LVU404
+ 1728               	.LBB54:
+ 436:matrix.c      ****                 return 0x10;
+ 1729               		.loc 1 436 17 view .LVU405
+ 436:matrix.c      ****                 return 0x10;
+ 1730               		.loc 1 436 17 view .LVU406
+ 1731               	.LBE54:
+ 1732 00be 80E0      		ldi r24,lo8(__c.2394)
+ 1733 00c0 90E0      		ldi r25,hi8(__c.2394)
+ 1734 00c2 9F93      		push r25
+ 1735               	.LCFI52:
+ 1736               		.cfi_def_cfa_offset 6
+ 1737 00c4 8F93      		push r24
+ 1738               	.LCFI53:
+ 1739               		.cfi_def_cfa_offset 7
+ 1740 00c6 0E94 0000 		call __xprintf
+ 1741               	.LVL131:
+ 437:matrix.c      ****             }
+ 1742               		.loc 1 437 17 view .LVU407
+ 437:matrix.c      ****             }
+ 1743               		.loc 1 437 24 is_stmt 0 view .LVU408
+ 1744 00ca 0F90      		pop __tmp_reg__
+ 1745 00cc 0F90      		pop __tmp_reg__
+ 1746               	.LCFI54:
+ 1747               		.cfi_def_cfa_offset 5
+ 1748 00ce 80E1      		ldi r24,lo8(16)
+ 1749 00d0 00C0      		rjmp .L94
+ 1750               	.LVL132:
+ 1751               	.L102:
+ 404:matrix.c      ****                 break;
+ 1752               		.loc 1 404 17 is_stmt 1 view .LVU409
+ 404:matrix.c      ****                 break;
+ 1753               		.loc 1 404 32 is_stmt 0 view .LVU410
+ 1754 00d2 2078      		andi r18,128
+ 1755               	.LVL133:
+ 404:matrix.c      ****                 break;
+ 1756               		.loc 1 404 23 view .LVU411
+ 1757 00d4 2264      		ori r18,66
+ 1758               	.LVL134:
+ 405:matrix.c      ****             case 0x01:  // Mute
+ 1759               		.loc 1 405 17 is_stmt 1 view .LVU412
+ 1760 00d6 00C0      		rjmp .L106
+ 1761               	.L103:
+ 407:matrix.c      ****                 break;
+ 1762               		.loc 1 407 17 view .LVU413
+ 407:matrix.c      ****                 break;
+ 1763               		.loc 1 407 32 is_stmt 0 view .LVU414
+ 1764 00d8 2078      		andi r18,128
+ 1765               	.LVL135:
+ 407:matrix.c      ****                 break;
+ 1766               		.loc 1 407 23 view .LVU415
+ 1767 00da 2A64      		ori r18,74
+ 1768               	.LVL136:
+ 408:matrix.c      ****             case 0x02:  // Volume down
+ 1769               		.loc 1 408 17 is_stmt 1 view .LVU416
+ 1770 00dc 00C0      		rjmp .L106
+ 1771               	.L100:
+ 410:matrix.c      ****                 break;
+ 1772               		.loc 1 410 17 view .LVU417
+ 410:matrix.c      ****                 break;
+ 1773               		.loc 1 410 32 is_stmt 0 view .LVU418
+ 1774 00de 2078      		andi r18,128
+ 1775               	.LVL137:
+ 410:matrix.c      ****                 break;
+ 1776               		.loc 1 410 23 view .LVU419
+ 1777 00e0 2964      		ori r18,73
+ 1778               	.LVL138:
+ 411:matrix.c      ****             case 0x03:  // Volume Up
+ 1779               		.loc 1 411 17 is_stmt 1 view .LVU420
+ 1780 00e2 00C0      		rjmp .L106
+ 1781               	.L105:
+ 413:matrix.c      ****                 break;
+ 1782               		.loc 1 413 17 view .LVU421
+ 413:matrix.c      ****                 break;
+ 1783               		.loc 1 413 32 is_stmt 0 view .LVU422
+ 1784 00e4 2078      		andi r18,128
+ 1785               	.LVL139:
+ 413:matrix.c      ****                 break;
+ 1786               		.loc 1 413 23 view .LVU423
+ 1787 00e6 2864      		ori r18,72
+ 1788               	.LVL140:
+ 414:matrix.c      ****             case 0x7F:  // no code
+ 1789               		.loc 1 414 17 is_stmt 1 view .LVU424
+ 1790 00e8 00C0      		rjmp .L106
+ 1791               	.L108:
+ 422:matrix.c      ****             case 0x00:  // Mic
+ 1792               		.loc 1 422 13 is_stmt 0 view .LVU425
+ 1793 00ea 0397      		sbiw r24,3
+ 1794 00ec 01F4      		brne .L111
+ 433:matrix.c      ****                 break;
+ 1795               		.loc 1 433 17 is_stmt 1 view .LVU426
+ 433:matrix.c      ****                 break;
+ 1796               		.loc 1 433 32 is_stmt 0 view .LVU427
+ 1797 00ee 3078      		andi r19,128
+ 1798               	.LVL141:
+ 433:matrix.c      ****                 break;
+ 1799               		.loc 1 433 23 view .LVU428
+ 1800 00f0 E901      		movw r28,r18
+ 1801 00f2 D864      		ori r29,72
+ 1802               	.LVL142:
+ 434:matrix.c      ****             default:
+ 1803               		.loc 1 434 17 is_stmt 1 view .LVU429
+ 1804 00f4 00C0      		rjmp .L95
+ 1805               	.LVL143:
+ 1806               	.L109:
+ 424:matrix.c      ****                 break;
+ 1807               		.loc 1 424 17 view .LVU430
+ 424:matrix.c      ****                 break;
+ 1808               		.loc 1 424 32 is_stmt 0 view .LVU431
+ 1809 00f6 3078      		andi r19,128
+ 1810               	.LVL144:
+ 424:matrix.c      ****                 break;
+ 1811               		.loc 1 424 23 view .LVU432
+ 1812 00f8 E901      		movw r28,r18
+ 1813 00fa D264      		ori r29,66
+ 1814               	.LVL145:
+ 425:matrix.c      ****             case 0x01:  // Mute
+ 1815               		.loc 1 425 17 is_stmt 1 view .LVU433
+ 1816               	.L95:
+ 441:matrix.c      ****     key1 = codes&0xFF;
+ 1817               		.loc 1 441 5 view .LVU434
+ 442:matrix.c      **** 
+ 1818               		.loc 1 442 5 view .LVU435
+ 444:matrix.c      ****         print("adb_host_kbd_recv: "); phex16(codes); print("\n");
+ 1819               		.loc 1 444 5 view .LVU436
+ 444:matrix.c      ****         print("adb_host_kbd_recv: "); phex16(codes); print("\n");
+ 1820               		.loc 1 444 9 is_stmt 0 view .LVU437
+ 1821 00fc 8091 0000 		lds r24,debug_config
+ 444:matrix.c      ****         print("adb_host_kbd_recv: "); phex16(codes); print("\n");
+ 1822               		.loc 1 444 8 view .LVU438
+ 1823 0100 81FF      		sbrs r24,1
+ 1824 0102 00C0      		rjmp .L113
+ 444:matrix.c      ****         print("adb_host_kbd_recv: "); phex16(codes); print("\n");
+ 1825               		.loc 1 444 22 discriminator 1 view .LVU439
+ 1826 0104 2097      		sbiw r28,0
+ 1827 0106 01F4      		brne .+2
+ 1828 0108 00C0      		rjmp .L114
+ 445:matrix.c      ****     }
+ 1829               		.loc 1 445 9 is_stmt 1 view .LVU440
+ 1830               	.LBB55:
+ 445:matrix.c      ****     }
+ 1831               		.loc 1 445 9 view .LVU441
+ 445:matrix.c      ****     }
+ 1832               		.loc 1 445 9 view .LVU442
+ 1833               	.LBE55:
+ 1834 010a 80E0      		ldi r24,lo8(__c.2396)
+ 1835 010c 90E0      		ldi r25,hi8(__c.2396)
+ 1836 010e 0E94 0000 		call xputs
+ 1837               	.LVL146:
+ 445:matrix.c      ****     }
+ 1838               		.loc 1 445 39 view .LVU443
+ 1839               	.LBB56:
+ 445:matrix.c      ****     }
+ 1840               		.loc 1 445 39 view .LVU444
+ 445:matrix.c      ****     }
+ 1841               		.loc 1 445 39 view .LVU445
+ 1842               	.LBE56:
+ 1843 0112 DF93      		push r29
+ 1844               	.LCFI55:
+ 1845               		.cfi_def_cfa_offset 6
+ 1846 0114 CF93      		push r28
+ 1847               	.LCFI56:
+ 1848               		.cfi_def_cfa_offset 7
+ 1849 0116 80E0      		ldi r24,lo8(__c.2398)
+ 1850 0118 90E0      		ldi r25,hi8(__c.2398)
+ 1851 011a 9F93      		push r25
+ 1852               	.LCFI57:
+ 1853               		.cfi_def_cfa_offset 8
+ 1854 011c 8F93      		push r24
+ 1855               	.LCFI58:
+ 1856               		.cfi_def_cfa_offset 9
+ 1857 011e 0E94 0000 		call __xprintf
+ 1858               	.LVL147:
+ 445:matrix.c      ****     }
+ 1859               		.loc 1 445 54 view .LVU446
+ 1860               	.LBB57:
+ 445:matrix.c      ****     }
+ 1861               		.loc 1 445 54 view .LVU447
+ 445:matrix.c      ****     }
+ 1862               		.loc 1 445 54 view .LVU448
+ 1863               	.LBE57:
+ 1864 0122 80E0      		ldi r24,lo8(__c.2400)
+ 1865 0124 90E0      		ldi r25,hi8(__c.2400)
+ 1866 0126 0E94 0000 		call xputs
+ 1867               	.LVL148:
+ 448:matrix.c      ****         return 0;
+ 1868               		.loc 1 448 5 view .LVU449
+ 445:matrix.c      ****     }
+ 1869               		.loc 1 445 54 is_stmt 0 view .LVU450
+ 1870 012a 0F90      		pop __tmp_reg__
+ 1871 012c 0F90      		pop __tmp_reg__
+ 1872 012e 0F90      		pop __tmp_reg__
+ 1873 0130 0F90      		pop __tmp_reg__
+ 1874               	.LCFI59:
+ 1875               		.cfi_def_cfa_offset 5
+ 1876               	.L115:
+ 450:matrix.c      ****         register_key(0x7F);
+ 1877               		.loc 1 450 12 is_stmt 1 view .LVU451
+ 450:matrix.c      ****         register_key(0x7F);
+ 1878               		.loc 1 450 15 is_stmt 0 view .LVU452
+ 1879 0132 CF37      		cpi r28,127
+ 1880 0134 DC07      		cpc r29,r28
+ 1881 0136 01F4      		brne .L116
+ 451:matrix.c      ****     } else if (codes == 0xFFFF) {   // power key release
+ 1882               		.loc 1 451 9 is_stmt 1 view .LVU453
+ 1883 0138 8FE7      		ldi r24,lo8(127)
+ 1884               	.L137:
+ 453:matrix.c      ****     } else {
+ 1885               		.loc 1 453 9 is_stmt 0 view .LVU454
+ 1886 013a 0E94 0000 		call register_key
+ 1887               	.LVL149:
+ 1888               	.L121:
+ 507:matrix.c      **** }
+ 1889               		.loc 1 507 12 view .LVU455
+ 1890 013e 81E0      		ldi r24,lo8(1)
+ 1891 0140 00C0      		rjmp .L94
+ 1892               	.LVL150:
+ 1893               	.L110:
+ 427:matrix.c      ****                 break;
+ 1894               		.loc 1 427 17 is_stmt 1 view .LVU456
+ 427:matrix.c      ****                 break;
+ 1895               		.loc 1 427 32 is_stmt 0 view .LVU457
+ 1896 0142 3078      		andi r19,128
+ 1897               	.LVL151:
+ 427:matrix.c      ****                 break;
+ 1898               		.loc 1 427 23 view .LVU458
+ 1899 0144 E901      		movw r28,r18
+ 1900 0146 DA64      		ori r29,74
+ 1901               	.LVL152:
+ 428:matrix.c      ****             case 0x02:  // Volume down
+ 1902               		.loc 1 428 17 is_stmt 1 view .LVU459
+ 1903 0148 00C0      		rjmp .L95
+ 1904               	.LVL153:
+ 1905               	.L107:
+ 430:matrix.c      ****                 break;
+ 1906               		.loc 1 430 17 view .LVU460
+ 430:matrix.c      ****                 break;
+ 1907               		.loc 1 430 32 is_stmt 0 view .LVU461
+ 1908 014a 3078      		andi r19,128
+ 1909               	.LVL154:
+ 430:matrix.c      ****                 break;
+ 1910               		.loc 1 430 23 view .LVU462
+ 1911 014c E901      		movw r28,r18
+ 1912 014e D964      		ori r29,73
+ 1913               	.LVL155:
+ 431:matrix.c      ****             case 0x03:  // Volume Up
+ 1914               		.loc 1 431 17 is_stmt 1 view .LVU463
+ 1915 0150 00C0      		rjmp .L95
+ 1916               	.LVL156:
+ 1917               	.L113:
+ 448:matrix.c      ****         return 0;
+ 1918               		.loc 1 448 5 view .LVU464
+ 448:matrix.c      ****         return 0;
+ 1919               		.loc 1 448 8 is_stmt 0 view .LVU465
+ 1920 0152 2097      		sbiw r28,0
+ 1921 0154 01F4      		brne .L115
+ 1922 0156 00C0      		rjmp .L114
+ 1923               	.L116:
+ 452:matrix.c      ****         register_key(0xFF);
+ 1924               		.loc 1 452 12 is_stmt 1 view .LVU466
+ 452:matrix.c      ****         register_key(0xFF);
+ 1925               		.loc 1 452 15 is_stmt 0 view .LVU467
+ 1926 0158 CF3F      		cpi r28,-1
+ 1927 015a DC07      		cpc r29,r28
+ 1928 015c 01F4      		brne .L117
+ 453:matrix.c      ****     } else {
+ 1929               		.loc 1 453 9 is_stmt 1 view .LVU468
+ 1930 015e 8FEF      		ldi r24,lo8(-1)
+ 1931 0160 00C0      		rjmp .L137
+ 1932               	.L117:
+ 441:matrix.c      ****     key1 = codes&0xFF;
+ 1933               		.loc 1 441 10 is_stmt 0 view .LVU469
+ 1934 0162 8D2F      		mov r24,r29
+ 442:matrix.c      **** 
+ 1935               		.loc 1 442 10 view .LVU470
+ 1936 0164 1C2F      		mov r17,r28
+ 457:matrix.c      ****             key0 = key1;
+ 1937               		.loc 1 457 9 is_stmt 1 view .LVU471
+ 457:matrix.c      ****             key0 = key1;
+ 1938               		.loc 1 457 12 is_stmt 0 view .LVU472
+ 1939 0166 DF3F      		cpi r29,lo8(-1)
+ 1940 0168 01F4      		brne .L118
+ 442:matrix.c      **** 
+ 1941               		.loc 1 442 10 view .LVU473
+ 1942 016a 8C2F      		mov r24,r28
+ 459:matrix.c      ****         }
+ 1943               		.loc 1 459 18 view .LVU474
+ 1944 016c 1FEF      		ldi r17,lo8(-1)
+ 1945               	.L118:
+ 1946               	.LVL157:
+ 495:matrix.c      ****             if ((key0 & 0x7F) == 0x32) {
+ 1947               		.loc 1 495 9 is_stmt 1 view .LVU475
+ 495:matrix.c      ****             if ((key0 & 0x7F) == 0x32) {
+ 1948               		.loc 1 495 12 is_stmt 0 view .LVU476
+ 1949 016e 9091 0000 		lds r25,is_iso_layout
+ 1950 0172 9923      		tst r25
+ 1951 0174 01F0      		breq .L119
+ 496:matrix.c      ****                 key0 = (key0 & 0x80) | 0x0A;
+ 1952               		.loc 1 496 13 is_stmt 1 view .LVU477
+ 1953 0176 982F      		mov r25,r24
+ 1954 0178 9F77      		andi r25,lo8(127)
+ 496:matrix.c      ****                 key0 = (key0 & 0x80) | 0x0A;
+ 1955               		.loc 1 496 16 is_stmt 0 view .LVU478
+ 1956 017a 9233      		cpi r25,lo8(50)
+ 1957 017c 01F4      		brne .L120
+ 497:matrix.c      ****             } else if ((key0 & 0x7F) == 0x0A) {
+ 1958               		.loc 1 497 17 is_stmt 1 view .LVU479
+ 497:matrix.c      ****             } else if ((key0 & 0x7F) == 0x0A) {
+ 1959               		.loc 1 497 30 is_stmt 0 view .LVU480
+ 1960 017e 8078      		andi r24,lo8(-128)
+ 1961               	.LVL158:
+ 497:matrix.c      ****             } else if ((key0 & 0x7F) == 0x0A) {
+ 1962               		.loc 1 497 38 view .LVU481
+ 1963 0180 8A60      		ori r24,lo8(10)
+ 1964               	.LVL159:
+ 1965               	.L119:
+ 502:matrix.c      ****         if (key1 != 0xFF)       // key1 is 0xFF when no second key.
+ 1966               		.loc 1 502 9 is_stmt 1 view .LVU482
+ 1967 0182 0E94 0000 		call register_key
+ 1968               	.LVL160:
+ 503:matrix.c      ****             extra_key = key1<<8 | 0xFF; // process in a separate call
+ 1969               		.loc 1 503 9 view .LVU483
+ 503:matrix.c      ****             extra_key = key1<<8 | 0xFF; // process in a separate call
+ 1970               		.loc 1 503 12 is_stmt 0 view .LVU484
+ 1971 0186 1F3F      		cpi r17,lo8(-1)
+ 1972 0188 01F0      		breq .L121
+ 504:matrix.c      ****     }
+ 1973               		.loc 1 504 13 is_stmt 1 view .LVU485
+ 504:matrix.c      ****     }
+ 1974               		.loc 1 504 29 is_stmt 0 view .LVU486
+ 1975 018a 812F      		mov r24,r17
+ 1976 018c 90E0      		ldi r25,0
+ 1977 018e 982F      		mov r25,r24
+ 1978 0190 8827      		clr r24
+ 504:matrix.c      ****     }
+ 1979               		.loc 1 504 33 view .LVU487
+ 1980 0192 8F6F      		ori r24,255
+ 504:matrix.c      ****     }
+ 1981               		.loc 1 504 23 view .LVU488
+ 1982 0194 9093 0000 		sts extra_key.2374+1,r25
+ 1983 0198 8093 0000 		sts extra_key.2374,r24
+ 1984 019c 00C0      		rjmp .L121
+ 1985               	.LVL161:
+ 1986               	.L120:
+ 498:matrix.c      ****                 key0 = (key0 & 0x80) | 0x32;
+ 1987               		.loc 1 498 20 is_stmt 1 view .LVU489
+ 498:matrix.c      ****                 key0 = (key0 & 0x80) | 0x32;
+ 1988               		.loc 1 498 23 is_stmt 0 view .LVU490
+ 1989 019e 9A30      		cpi r25,lo8(10)
+ 1990 01a0 01F4      		brne .L119
+ 499:matrix.c      ****             }
+ 1991               		.loc 1 499 17 is_stmt 1 view .LVU491
+ 499:matrix.c      ****             }
+ 1992               		.loc 1 499 30 is_stmt 0 view .LVU492
+ 1993 01a2 8078      		andi r24,lo8(-128)
+ 1994               	.LVL162:
+ 499:matrix.c      ****             }
+ 1995               		.loc 1 499 38 view .LVU493
+ 1996 01a4 8263      		ori r24,lo8(50)
+ 1997               	.LVL163:
+ 499:matrix.c      ****             }
+ 1998               		.loc 1 499 38 view .LVU494
+ 1999 01a6 00C0      		rjmp .L119
+ 2000               		.cfi_endproc
+ 2001               	.LFE11:
+ 2003               		.section	.text.matrix_get_row,"ax",@progbits
+ 2004               	.global	matrix_get_row
+ 2006               	matrix_get_row:
+ 2007               	.LVL164:
+ 2008               	.LFB12:
+ 512:matrix.c      ****     return matrix[row];
+ 2009               		.loc 1 512 1 is_stmt 1 view -0
+ 2010               		.cfi_startproc
+ 2011               	/* prologue: function */
+ 2012               	/* frame size = 0 */
+ 2013               	/* stack size = 0 */
+ 2014               	.L__stack_usage = 0
+ 513:matrix.c      **** }
+ 2015               		.loc 1 513 5 view .LVU496
+ 513:matrix.c      **** }
+ 2016               		.loc 1 513 18 is_stmt 0 view .LVU497
+ 2017 0000 E82F      		mov r30,r24
+ 2018 0002 F0E0      		ldi r31,0
+ 2019 0004 E050      		subi r30,lo8(-(matrix))
+ 2020 0006 F040      		sbci r31,hi8(-(matrix))
+ 514:matrix.c      **** 
+ 2021               		.loc 1 514 1 view .LVU498
+ 2022 0008 8081      		ld r24,Z
+ 2023               	.LVL165:
+ 2024               	/* epilogue start */
+ 514:matrix.c      **** 
+ 2025               		.loc 1 514 1 view .LVU499
+ 2026 000a 0895      		ret
+ 2027               		.cfi_endproc
+ 2028               	.LFE12:
+ 2030               		.section	.text.led_set,"ax",@progbits
+ 2031               	.global	led_set
+ 2033               	led_set:
+ 2034               	.LVL166:
+ 2035               	.LFB14:
+ 528:matrix.c      **** 
+ 529:matrix.c      **** void led_set(uint8_t usb_led)
+ 530:matrix.c      **** {
+ 2036               		.loc 1 530 1 is_stmt 1 view -0
+ 2037               		.cfi_startproc
+ 2038               	/* prologue: function */
+ 2039               	/* frame size = 0 */
+ 2040               	/* stack size = 0 */
+ 2041               	.L__stack_usage = 0
+ 531:matrix.c      ****     adb_host_kbd_led(ADB_ADDR_KEYBOARD, ~usb_led);
+ 2042               		.loc 1 531 5 view .LVU501
+ 2043 0000 682F      		mov r22,r24
+ 2044 0002 6095      		com r22
+ 2045 0004 82E0      		ldi r24,lo8(2)
+ 2046               	.LVL167:
+ 2047               		.loc 1 531 5 is_stmt 0 view .LVU502
+ 2048 0006 0C94 0000 		jmp adb_host_kbd_led
+ 2049               	.LVL168:
+ 2050               		.loc 1 531 5 view .LVU503
+ 2051               		.cfi_endproc
+ 2052               	.LFE14:
+ 2054               		.section	.rodata.matrix_init.str1.1,"aMS",@progbits,1
+ 2055               	.LC0:
+ 2056 0000 7965 7300 		.string	"yes"
+ 2057               	.LC1:
+ 2058 0004 6E6F 00   		.string	"no"
+ 2059               		.section	.text.matrix_init,"ax",@progbits
+ 2060               	.global	matrix_init
+ 2062               	matrix_init:
+ 2063               	.LFB8:
+  64:matrix.c      ****     debug_enable = true;
+ 2064               		.loc 1 64 1 is_stmt 1 view -0
+ 2065               		.cfi_startproc
+ 2066               	/* prologue: function */
+ 2067               	/* frame size = 0 */
+ 2068               	/* stack size = 0 */
+ 2069               	.L__stack_usage = 0
+  65:matrix.c      ****     //debug_matrix = true;
+ 2070               		.loc 1 65 5 view .LVU505
+  65:matrix.c      ****     //debug_matrix = true;
+ 2071               		.loc 1 65 18 is_stmt 0 view .LVU506
+ 2072 0000 8091 0000 		lds r24,debug_config
+ 2073 0004 8160      		ori r24,lo8(1<<0)
+ 2074 0006 8093 0000 		sts debug_config,r24
+  71:matrix.c      **** 
+ 2075               		.loc 1 71 5 is_stmt 1 view .LVU507
+  71:matrix.c      **** 
+ 2076               		.loc 1 71 10 is_stmt 0 view .LVU508
+ 2077 000a 569A      		sbi 0xa,6
+  71:matrix.c      **** 
+ 2078               		.loc 1 71 21 is_stmt 1 view .LVU509
+  71:matrix.c      **** 
+ 2079               		.loc 1 71 27 is_stmt 0 view .LVU510
+ 2080 000c 5E9A      		sbi 0xb,6
+  73:matrix.c      **** 
+ 2081               		.loc 1 73 5 is_stmt 1 view .LVU511
+ 2082 000e 0E94 0000 		call adb_host_init
+ 2083               	.LVL169:
+  76:matrix.c      **** 
+ 2084               		.loc 1 76 5 view .LVU512
+ 2085               	.LBB58:
+ 2086               	.LBI58:
+ 2087               		.file 2 "/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h"
+   1:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /* Copyright (c) 2002, Marek Michalkiewicz
+   2:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    Copyright (c) 2004,2005,2007 Joerg Wunsch
+   3:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    Copyright (c) 2007  Florin-Viorel Petrov
+   4:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    All rights reserved.
+   5:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+   6:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    Redistribution and use in source and binary forms, with or without
+   7:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    modification, are permitted provided that the following conditions are met:
+   8:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+   9:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    * Redistributions of source code must retain the above copyright
+  10:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****      notice, this list of conditions and the following disclaimer.
+  11:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  12:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    * Redistributions in binary form must reproduce the above copyright
+  13:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****      notice, this list of conditions and the following disclaimer in
+  14:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****      the documentation and/or other materials provided with the
+  15:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****      distribution.
+  16:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  17:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    * Neither the name of the copyright holders nor the names of
+  18:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****      contributors may be used to endorse or promote products derived
+  19:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****      from this software without specific prior written permission.
+  20:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  21:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  22:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  23:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  24:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+  25:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  26:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  27:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  28:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  29:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  30:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  31:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   POSSIBILITY OF SUCH DAMAGE. */
+  32:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  33:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /* $Id: delay.h.in 2506 2016-02-08 10:05:45Z joerg_wunsch $ */
+  34:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  35:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #ifndef _UTIL_DELAY_H_
+  36:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #define _UTIL_DELAY_H_ 1
+  37:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  38:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #ifndef __DOXYGEN__
+  39:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #  ifndef __HAS_DELAY_CYCLES
+  40:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #    define __HAS_DELAY_CYCLES 1
+  41:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #  endif
+  42:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #endif  /* __DOXYGEN__ */
+  43:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  44:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #include <inttypes.h>
+  45:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #include <util/delay_basic.h>
+  46:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #include <math.h>
+  47:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  48:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /** \file */
+  49:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /** \defgroup util_delay <util/delay.h>: Convenience functions for busy-wait delay loops
+  50:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     \code
+  51:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     #define F_CPU 1000000UL  // 1 MHz
+  52:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     //#define F_CPU 14.7456E6
+  53:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     #include <util/delay.h>
+  54:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     \endcode
+  55:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  56:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     \note As an alternative method, it is possible to pass the
+  57:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     F_CPU macro down to the compiler from the Makefile.
+  58:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     Obviously, in that case, no \c \#define statement should be
+  59:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     used.
+  60:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  61:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     The functions in this header file are wrappers around the basic
+  62:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     busy-wait functions from <util/delay_basic.h>.  They are meant as
+  63:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     convenience functions where actual time values can be specified
+  64:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     rather than a number of cycles to wait for.  The idea behind is
+  65:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     that compile-time constant expressions will be eliminated by
+  66:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     compiler optimization so floating-point expressions can be used
+  67:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     to calculate the number of delay cycles needed based on the CPU
+  68:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     frequency passed by the macro F_CPU.
+  69:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  70:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     \note In order for these functions to work as intended, compiler
+  71:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     optimizations <em>must</em> be enabled, and the delay time
+  72:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     <em>must</em> be an expression that is a known constant at
+  73:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     compile-time.  If these requirements are not met, the resulting
+  74:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     delay will be much longer (and basically unpredictable), and
+  75:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     applications that otherwise do not use floating-point calculations
+  76:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     will experience severe code bloat by the floating-point library
+  77:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     routines linked into the application.
+  78:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  79:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     The functions available allow the specification of microsecond, and
+  80:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     millisecond delays directly, using the application-supplied macro
+  81:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     F_CPU as the CPU clock frequency (in Hertz).
+  82:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  83:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** */
+  84:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  85:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #if !defined(__DOXYGEN__)
+  86:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** static __inline__ void _delay_us(double __us) __attribute__((__always_inline__));
+  87:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** static __inline__ void _delay_ms(double __ms) __attribute__((__always_inline__));
+  88:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #endif
+  89:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  90:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #ifndef F_CPU
+  91:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /* prevent compiler error by supplying a default */
+  92:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** # warning "F_CPU not defined for <util/delay.h>"
+  93:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /** \ingroup util_delay
+  94:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     \def F_CPU
+  95:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     \brief CPU frequency in Hz
+  96:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+  97:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     The macro F_CPU specifies the CPU frequency to be considered by
+  98:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     the delay macros.  This macro is normally supplied by the
+  99:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     environment (e.g. from within a project header, or the project's
+ 100:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     Makefile).  The value 1 MHz here is only provided as a "vanilla"
+ 101:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     fallback if no such user-provided definition could be found.
+ 102:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 103:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     In terms of the delay functions, the CPU frequency can be given as
+ 104:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     a floating-point constant (e.g. 3.6864E6 for 3.6864 MHz).
+ 105:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     However, the macros in <util/setbaud.h> require it to be an
+ 106:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****     integer value.
+ 107:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****  */
+ 108:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** # define F_CPU 1000000UL
+ 109:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #endif
+ 110:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 111:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #ifndef __OPTIMIZE__
+ 112:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** # warning "Compiler optimizations disabled; functions from <util/delay.h> won't work as designed"
+ 113:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #endif
+ 114:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 115:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #if __HAS_DELAY_CYCLES && defined(__OPTIMIZE__) && \
+ 116:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   !defined(__DELAY_BACKWARD_COMPATIBLE__) &&	   \
+ 117:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   __STDC_HOSTED__
+ 118:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #  include <math.h>
+ 119:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #endif
+ 120:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 121:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** /**
+ 122:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    \ingroup util_delay
+ 123:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 124:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    Perform a delay of \c __ms milliseconds, using _delay_loop_2().
+ 125:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 126:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    The macro F_CPU is supposed to be defined to a
+ 127:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    constant defining the CPU clock frequency (in Hertz).
+ 128:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 129:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    The maximal possible delay is 262.14 ms / F_CPU in MHz.
+ 130:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 131:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    When the user request delay which exceed the maximum possible one,
+ 132:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    _delay_ms() provides a decreased resolution functionality. In this
+ 133:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    mode _delay_ms() will work with a resolution of 1/10 ms, providing
+ 134:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    delays up to 6.5535 seconds (independent from CPU frequency).  The
+ 135:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    user will not be informed about decreased resolution.
+ 136:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 137:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    If the avr-gcc toolchain has __builtin_avr_delay_cycles()
+ 138:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    support, maximal possible delay is 4294967.295 ms/ F_CPU in MHz. For
+ 139:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    values greater than the maximal possible delay, overflows results in
+ 140:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    no delay i.e., 0ms.
+ 141:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 142:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    Conversion of \c __ms into clock cycles may not always result in
+ 143:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    integer.  By default, the clock cycles rounded up to next
+ 144:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    integer. This ensures that the user gets at least \c __ms
+ 145:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    microseconds of delay.
+ 146:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 147:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    Alternatively, by defining the macro \c __DELAY_ROUND_DOWN__, or
+ 148:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    \c __DELAY_ROUND_CLOSEST__, before including this header file, the
+ 149:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    algorithm can be made to round down, or round to closest integer,
+ 150:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    respectively.
+ 151:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 152:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    \note
+ 153:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 154:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    The implementation of _delay_ms() based on
+ 155:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    __builtin_avr_delay_cycles() is not backward compatible with older
+ 156:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    implementations.  In order to get functionality backward compatible
+ 157:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    with previous versions, the macro \c "__DELAY_BACKWARD_COMPATIBLE__"
+ 158:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    must be defined before including this header file. Also, the
+ 159:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    backward compatible algorithm will be chosen if the code is
+ 160:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    compiled in a <em>freestanding environment</em> (GCC option
+ 161:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    \c -ffreestanding), as the math functions required for rounding are
+ 162:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****    not available to the compiler then.
+ 163:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 164:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****  */
+ 165:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** void
+ 166:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** _delay_ms(double __ms)
+ 2088               		.loc 2 166 1 view .LVU513
+ 2089               	.LBB59:
+ 167:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** {
+ 168:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	double __tmp ;
+ 2090               		.loc 2 168 2 view .LVU514
+ 169:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** #if __HAS_DELAY_CYCLES && defined(__OPTIMIZE__) && \
+ 170:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   !defined(__DELAY_BACKWARD_COMPATIBLE__) &&	   \
+ 171:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h ****   __STDC_HOSTED__
+ 172:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	uint32_t __ticks_dc;
+ 2091               		.loc 2 172 2 view .LVU515
+ 173:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	extern void __builtin_avr_delay_cycles(unsigned long);
+ 2092               		.loc 2 173 2 view .LVU516
+ 174:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	__tmp = ((F_CPU) / 1e3) * __ms;
+ 2093               		.loc 2 174 2 view .LVU517
+ 175:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 176:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	#if defined(__DELAY_ROUND_DOWN__)
+ 177:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)fabs(__tmp);
+ 178:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 179:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	#elif defined(__DELAY_ROUND_CLOSEST__)
+ 180:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)(fabs(__tmp)+0.5);
+ 181:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 182:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	#else
+ 183:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 		//round up by default
+ 184:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)(ceil(fabs(__tmp)));
+ 2094               		.loc 2 184 3 view .LVU518
+ 185:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	#endif
+ 186:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 
+ 187:/usr/local/Cellar/avr-gcc/9.1.0/avr/include/util/delay.h **** 	__builtin_avr_delay_cycles(__ticks_dc);
+ 2095               		.loc 2 187 2 view .LVU519
+ 2096 0012 2FEF      		ldi r18,lo8(319999)
+ 2097 0014 81EE      		ldi r24,hi8(319999)
+ 2098 0016 94E0      		ldi r25,hlo8(319999)
+ 2099 0018 2150      	1:	subi r18,1
+ 2100 001a 8040      		sbci r24,0
+ 2101 001c 9040      		sbci r25,0
+ 2102 001e 01F4      		brne 1b
+ 2103 0020 00C0      		rjmp .
+ 2104 0022 0000      		nop
+ 2105               	.LVL170:
+ 2106               		.loc 2 187 2 is_stmt 0 view .LVU520
+ 2107               	.LBE59:
+ 2108               	.LBE58:
+  78:matrix.c      **** 
+ 2109               		.loc 1 78 5 is_stmt 1 view .LVU521
+ 2110 0024 0E94 0000 		call device_scan
+ 2111               	.LVL171:
+  83:matrix.c      ****     // Determine ISO keyboard by handler id
+ 2112               		.loc 1 83 5 view .LVU522
+ 2113               	.LBB60:
+  83:matrix.c      ****     // Determine ISO keyboard by handler id
+ 2114               		.loc 1 83 5 view .LVU523
+  83:matrix.c      ****     // Determine ISO keyboard by handler id
+ 2115               		.loc 1 83 5 view .LVU524
+ 2116               	.LBE60:
+ 2117 0028 80E0      		ldi r24,lo8(__c.2272)
+ 2118 002a 90E0      		ldi r25,hi8(__c.2272)
+ 2119 002c 9F93      		push r25
+ 2120               	.LCFI60:
+ 2121               		.cfi_def_cfa_offset 3
+ 2122 002e 8F93      		push r24
+ 2123               	.LCFI61:
+ 2124               		.cfi_def_cfa_offset 4
+ 2125 0030 0E94 0000 		call __xprintf
+ 2126               	.LVL172:
+  86:matrix.c      ****     switch (handler_id) {
+ 2127               		.loc 1 86 5 view .LVU525
+  86:matrix.c      ****     switch (handler_id) {
+ 2128               		.loc 1 86 36 is_stmt 0 view .LVU526
+ 2129 0034 63E0      		ldi r22,lo8(3)
+ 2130 0036 82E0      		ldi r24,lo8(2)
+ 2131 0038 0E94 0000 		call adb_host_talk
+ 2132               	.LVL173:
+ 2133 003c 9C01      		movw r18,r24
+ 2134               	.LVL174:
+  87:matrix.c      ****     case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
+ 2135               		.loc 1 87 5 is_stmt 1 view .LVU527
+ 2136 003e AC01      		movw r20,r24
+ 2137 0040 5527      		clr r21
+ 2138 0042 0F90      		pop __tmp_reg__
+ 2139 0044 0F90      		pop __tmp_reg__
+ 2140               	.LCFI62:
+ 2141               		.cfi_def_cfa_offset 2
+ 2142 0046 8E31      		cpi r24,lo8(30)
+ 2143 0048 00F0      		brlo .+2
+ 2144 004a 00C0      		rjmp .L141
+ 2145 004c 2C7F      		andi r18,252
+ 2146 004e 3327      		clr r19
+ 2147               	.LVL175:
+  87:matrix.c      ****     case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
+ 2148               		.loc 1 87 5 is_stmt 0 view .LVU528
+ 2149 0050 232B      		or r18,r19
+ 2150 0052 01F4      		brne .+2
+ 2151 0054 00C0      		rjmp .L143
+ 2152 0056 FA01      		movw r30,r20
+ 2153 0058 3497      		sbiw r30,4
+ 2154 005a EA31      		cpi r30,26
+ 2155 005c F105      		cpc r31,__zero_reg__
+ 2156 005e 00F0      		brlo .+2
+ 2157 0060 00C0      		rjmp .L143
+ 2158 0062 E050      		subi r30,lo8(-(gs(.L145)))
+ 2159 0064 F040      		sbci r31,hi8(-(gs(.L145)))
+ 2160 0066 0C94 0000 		jmp __tablejump2__
+ 2161               		.section	.jumptables.gcc.matrix_init,"a",@progbits
+ 2162               		.p2align	1
+ 2163               	.L145:
+ 2164 0000 0000      		.word gs(.L144)
+ 2165 0002 0000      		.word gs(.L144)
+ 2166 0004 0000      		.word gs(.L143)
+ 2167 0006 0000      		.word gs(.L144)
+ 2168 0008 0000      		.word gs(.L143)
+ 2169 000a 0000      		.word gs(.L144)
+ 2170 000c 0000      		.word gs(.L143)
+ 2171 000e 0000      		.word gs(.L143)
+ 2172 0010 0000      		.word gs(.L143)
+ 2173 0012 0000      		.word gs(.L144)
+ 2174 0014 0000      		.word gs(.L143)
+ 2175 0016 0000      		.word gs(.L143)
+ 2176 0018 0000      		.word gs(.L143)
+ 2177 001a 0000      		.word gs(.L144)
+ 2178 001c 0000      		.word gs(.L143)
+ 2179 001e 0000      		.word gs(.L143)
+ 2180 0020 0000      		.word gs(.L144)
+ 2181 0022 0000      		.word gs(.L143)
+ 2182 0024 0000      		.word gs(.L143)
+ 2183 0026 0000      		.word gs(.L143)
+ 2184 0028 0000      		.word gs(.L143)
+ 2185 002a 0000      		.word gs(.L144)
+ 2186 002c 0000      		.word gs(.L143)
+ 2187 002e 0000      		.word gs(.L143)
+ 2188 0030 0000      		.word gs(.L143)
+ 2189 0032 0000      		.word gs(.L144)
+ 2190               		.section	.text.matrix_init
+ 2191               	.L146:
+ 2192 006a 81E0      		ldi r24,lo8(1)
+ 2193               	.LVL176:
+  87:matrix.c      ****     case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
+ 2194               		.loc 1 87 5 view .LVU529
+ 2195 006c 00C0      		rjmp 2f
+ 2196               		1:
+ 2197 006e 880F      		lsl r24
+ 2198               		2:
+ 2199 0070 2A95      		dec r18
+ 2200 0072 02F4      		brpl 1b
+ 2201 0074 8974      		andi r24,lo8(73)
+ 2202 0076 01F4      		brne .+2
+ 2203 0078 00C0      		rjmp .L143
+ 2204               	.L144:
+  91:matrix.c      ****         break;
+ 2205               		.loc 1 91 9 is_stmt 1 view .LVU530
+  91:matrix.c      ****         break;
+ 2206               		.loc 1 91 23 is_stmt 0 view .LVU531
+ 2207 007a 81E0      		ldi r24,lo8(1)
+ 2208 007c 8093 0000 		sts is_iso_layout,r24
+  92:matrix.c      ****     default:
+ 2209               		.loc 1 92 9 is_stmt 1 view .LVU532
+  97:matrix.c      **** 
+ 2210               		.loc 1 97 5 view .LVU533
+ 2211 0080 80E0      		ldi r24,lo8(.LC0)
+ 2212 0082 90E0      		ldi r25,hi8(.LC0)
+ 2213               	.L147:
+ 2214               	.LBB61:
+  97:matrix.c      **** 
+ 2215               		.loc 1 97 5 discriminator 4 view .LVU534
+  97:matrix.c      **** 
+ 2216               		.loc 1 97 5 discriminator 4 view .LVU535
+ 2217               	.LBE61:
+ 2218 0084 9F93      		push r25
+ 2219               	.LCFI63:
+ 2220               		.cfi_def_cfa_offset 3
+ 2221 0086 8F93      		push r24
+ 2222               	.LCFI64:
+ 2223               		.cfi_def_cfa_offset 4
+ 2224 0088 5F93      		push r21
+ 2225               	.LCFI65:
+ 2226               		.cfi_def_cfa_offset 5
+ 2227 008a 4F93      		push r20
+ 2228               	.LCFI66:
+ 2229               		.cfi_def_cfa_offset 6
+ 2230 008c 80E0      		ldi r24,lo8(__c.2289)
+ 2231 008e 90E0      		ldi r25,hi8(__c.2289)
+ 2232 0090 9F93      		push r25
+ 2233               	.LCFI67:
+ 2234               		.cfi_def_cfa_offset 7
+ 2235 0092 8F93      		push r24
+ 2236               	.LCFI68:
+ 2237               		.cfi_def_cfa_offset 8
+ 2238 0094 0E94 0000 		call __xprintf
+ 2239               	.LVL177:
+ 100:matrix.c      ****     if (has_media_keys) {
+ 2240               		.loc 1 100 5 discriminator 4 view .LVU536
+ 100:matrix.c      ****     if (has_media_keys) {
+ 2241               		.loc 1 100 32 is_stmt 0 discriminator 4 view .LVU537
+ 2242 0098 63E0      		ldi r22,lo8(3)
+ 2243 009a 87E0      		ldi r24,lo8(7)
+ 2244 009c 0E94 0000 		call adb_host_talk
+ 2245               	.LVL178:
+ 100:matrix.c      ****     if (has_media_keys) {
+ 2246               		.loc 1 100 77 discriminator 4 view .LVU538
+ 2247 00a0 282F      		mov r18,r24
+ 2248 00a2 30E0      		ldi r19,0
+ 100:matrix.c      ****     if (has_media_keys) {
+ 2249               		.loc 1 100 28 discriminator 4 view .LVU539
+ 2250 00a4 91E0      		ldi r25,lo8(1)
+ 2251 00a6 0F90      		pop __tmp_reg__
+ 2252 00a8 0F90      		pop __tmp_reg__
+ 2253 00aa 0F90      		pop __tmp_reg__
+ 2254 00ac 0F90      		pop __tmp_reg__
+ 2255 00ae 0F90      		pop __tmp_reg__
+ 2256 00b0 0F90      		pop __tmp_reg__
+ 2257               	.LCFI69:
+ 2258               		.cfi_def_cfa_offset 2
+ 2259 00b2 8230      		cpi r24,lo8(2)
+ 2260 00b4 01F0      		breq .L148
+ 2261 00b6 90E0      		ldi r25,0
+ 2262               	.L148:
+ 100:matrix.c      ****     if (has_media_keys) {
+ 2263               		.loc 1 100 20 discriminator 4 view .LVU540
+ 2264 00b8 9093 0000 		sts has_media_keys,r25
+ 101:matrix.c      ****         xprintf("Media keys\n");
+ 2265               		.loc 1 101 5 is_stmt 1 discriminator 4 view .LVU541
+ 101:matrix.c      ****         xprintf("Media keys\n");
+ 2266               		.loc 1 101 8 is_stmt 0 discriminator 4 view .LVU542
+ 2267 00bc 2230      		cpi r18,2
+ 2268 00be 3105      		cpc r19,__zero_reg__
+ 2269 00c0 01F4      		brne .L149
+ 102:matrix.c      ****     }
+ 2270               		.loc 1 102 9 is_stmt 1 view .LVU543
+ 2271               	.LBB62:
+ 102:matrix.c      ****     }
+ 2272               		.loc 1 102 9 view .LVU544
+ 102:matrix.c      ****     }
+ 2273               		.loc 1 102 9 view .LVU545
+ 2274               	.LBE62:
+ 2275 00c2 80E0      		ldi r24,lo8(__c.2291)
+ 2276 00c4 90E0      		ldi r25,hi8(__c.2291)
+ 2277 00c6 9F93      		push r25
+ 2278               	.LCFI70:
+ 2279               		.cfi_def_cfa_offset 3
+ 2280 00c8 8F93      		push r24
+ 2281               	.LCFI71:
+ 2282               		.cfi_def_cfa_offset 4
+ 2283 00ca 0E94 0000 		call __xprintf
+ 2284               	.LVL179:
+ 2285 00ce 0F90      		pop __tmp_reg__
+ 2286 00d0 0F90      		pop __tmp_reg__
+ 2287               	.LCFI72:
+ 2288               		.cfi_def_cfa_offset 2
+ 2289               	.L149:
+ 109:matrix.c      **** 
+ 2290               		.loc 1 109 5 view .LVU546
+ 2291 00d2 23E0      		ldi r18,lo8(3)
+ 2292 00d4 42E0      		ldi r20,lo8(2)
+ 2293 00d6 63E0      		ldi r22,lo8(3)
+ 2294 00d8 82E0      		ldi r24,lo8(2)
+ 2295 00da 0E94 0000 		call adb_host_listen
+ 2296               	.LVL180:
+ 117:matrix.c      **** 
+ 2297               		.loc 1 117 5 view .LVU547
+ 2298               	.LBB63:
+ 117:matrix.c      **** 
+ 2299               		.loc 1 117 5 view .LVU548
+ 117:matrix.c      **** 
+ 2300               		.loc 1 117 5 view .LVU549
+ 2301               	.LBE63:
+ 2302 00de 80E0      		ldi r24,lo8(__c.2293)
+ 2303 00e0 90E0      		ldi r25,hi8(__c.2293)
+ 2304 00e2 9F93      		push r25
+ 2305               	.LCFI73:
+ 2306               		.cfi_def_cfa_offset 3
+ 2307 00e4 8F93      		push r24
+ 2308               	.LCFI74:
+ 2309               		.cfi_def_cfa_offset 4
+ 2310 00e6 0E94 0000 		call __xprintf
+ 2311               	.LVL181:
+ 120:matrix.c      ****     #endif
+ 2312               		.loc 1 120 5 view .LVU550
+ 2313 00ea 0E94 0000 		call mouse_init.constprop.0
+ 2314               	.LVL182:
+ 123:matrix.c      **** 
+ 2315               		.loc 1 123 5 view .LVU551
+ 2316 00ee 0E94 0000 		call device_scan
+ 2317               	.LVL183:
+ 126:matrix.c      **** 
+ 2318               		.loc 1 126 5 view .LVU552
+ 2319               	.LBB64:
+ 126:matrix.c      **** 
+ 2320               		.loc 1 126 10 view .LVU553
+ 126:matrix.c      **** 
+ 2321               		.loc 1 126 10 is_stmt 0 view .LVU554
+ 2322 00f2 E0E0      		ldi r30,lo8(matrix)
+ 2323 00f4 F0E0      		ldi r31,hi8(matrix)
+ 2324 00f6 0F90      		pop __tmp_reg__
+ 2325 00f8 0F90      		pop __tmp_reg__
+ 2326               	.LCFI75:
+ 2327               		.cfi_def_cfa_offset 2
+ 2328               	.LVL184:
+ 2329               	.L150:
+ 126:matrix.c      **** 
+ 2330               		.loc 1 126 45 is_stmt 1 discriminator 3 view .LVU555
+ 126:matrix.c      **** 
+ 2331               		.loc 1 126 55 is_stmt 0 discriminator 3 view .LVU556
+ 2332 00fa 1192      		st Z+,__zero_reg__
+ 2333               	.LVL185:
+ 126:matrix.c      **** 
+ 2334               		.loc 1 126 5 discriminator 3 view .LVU557
+ 2335 00fc 20E0      		ldi r18,hi8(matrix+16)
+ 2336 00fe E030      		cpi r30,lo8(matrix+16)
+ 2337 0100 F207      		cpc r31,r18
+ 2338 0102 01F4      		brne .L150
+ 2339               	.LBE64:
+ 128:matrix.c      **** 
+ 2340               		.loc 1 128 5 is_stmt 1 view .LVU558
+ 2341 0104 0E94 0000 		call host_keyboard_leds
+ 2342               	.LVL186:
+ 128:matrix.c      **** 
+ 2343               		.loc 1 128 5 is_stmt 0 view .LVU559
+ 2344 0108 0E94 0000 		call led_set
+ 2345               	.LVL187:
+ 131:matrix.c      ****     return;
+ 2346               		.loc 1 131 5 is_stmt 1 view .LVU560
+ 131:matrix.c      ****     return;
+ 2347               		.loc 1 131 10 is_stmt 0 view .LVU561
+ 2348 010c 569A      		sbi 0xa,6
+ 131:matrix.c      ****     return;
+ 2349               		.loc 1 131 21 is_stmt 1 view .LVU562
+ 131:matrix.c      ****     return;
+ 2350               		.loc 1 131 27 is_stmt 0 view .LVU563
+ 2351 010e 5E98      		cbi 0xb,6
+ 132:matrix.c      **** }
+ 2352               		.loc 1 132 5 is_stmt 1 view .LVU564
+ 2353               	/* epilogue start */
+ 133:matrix.c      **** 
+ 2354               		.loc 1 133 1 is_stmt 0 view .LVU565
+ 2355 0110 0895      		ret
+ 2356               	.LVL188:
+ 2357               	.L141:
+  87:matrix.c      ****     case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
+ 2358               		.loc 1 87 5 view .LVU566
+ 2359 0112 9A01      		movw r18,r20
+ 2360               	.LVL189:
+  87:matrix.c      ****     case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
+ 2361               		.loc 1 87 5 view .LVU567
+ 2362 0114 215C      		subi r18,-63
+ 2363 0116 3109      		sbc r19,__zero_reg__
+ 2364 0118 2730      		cpi r18,7
+ 2365 011a 3105      		cpc r19,__zero_reg__
+ 2366 011c 00F4      		brsh .+2
+ 2367 011e 00C0      		rjmp .L146
+ 2368               	.LVL190:
+ 2369               	.L143:
+  94:matrix.c      ****         break;
+ 2370               		.loc 1 94 9 is_stmt 1 view .LVU568
+  94:matrix.c      ****         break;
+ 2371               		.loc 1 94 23 is_stmt 0 view .LVU569
+ 2372 0120 1092 0000 		sts is_iso_layout,__zero_reg__
+  95:matrix.c      ****     }
+ 2373               		.loc 1 95 9 is_stmt 1 view .LVU570
+  97:matrix.c      **** 
+ 2374               		.loc 1 97 5 view .LVU571
+ 2375 0124 80E0      		ldi r24,lo8(.LC1)
+ 2376 0126 90E0      		ldi r25,hi8(.LC1)
+ 2377 0128 00C0      		rjmp .L147
+ 2378               		.cfi_endproc
+ 2379               	.LFE8:
+ 2381               		.section	.progmem.data.__c.2400,"a"
+ 2384               	__c.2400:
+ 2385 0000 0A00      		.string	"\n"
+ 2386               		.section	.progmem.data.__c.2398,"a"
+ 2389               	__c.2398:
+ 2390 0000 2530 3458 		.string	"%04X"
+ 2390      00
+ 2391               		.section	.progmem.data.__c.2396,"a"
+ 2394               	__c.2396:
+ 2395 0000 6164 625F 		.string	"adb_host_kbd_recv: "
+ 2395      686F 7374 
+ 2395      5F6B 6264 
+ 2395      5F72 6563 
+ 2395      763A 2000 
+ 2396               		.section	.progmem.data.__c.2394,"a"
+ 2399               	__c.2394:
+ 2400 0000 4552 524F 		.string	"ERROR: media key0\n"
+ 2400      523A 206D 
+ 2400      6564 6961 
+ 2400      206B 6579 
+ 2400      300A 00
+ 2401               		.section	.progmem.data.__c.2386,"a"
+ 2404               	__c.2386:
+ 2405 0000 4552 524F 		.string	"ERROR: media key1\n"
+ 2405      523A 206D 
+ 2405      6564 6961 
+ 2405      206B 6579 
+ 2405      310A 00
+ 2406               		.section	.bss.tick_ms.2378,"aw",@nobits
+ 2409               	tick_ms.2378:
+ 2410 0000 0000      		.zero	2
+ 2411               		.section	.data.extra_key.2374,"aw"
+ 2414               	extra_key.2374:
+ 2415 0000 FFFF      		.word	-1
+ 2416               		.section	.progmem.data.__c.2369,"a"
+ 2419               	__c.2369:
+ 2420 0000 5B42 3A25 		.string	"[B:%02X, X:%d(%d), Y:%d(%d), A:%d]\n"
+ 2420      3032 582C 
+ 2420      2058 3A25 
+ 2420      6428 2564 
+ 2420      292C 2059 
+ 2421               		.section	.progmem.data.__c.2367,"a"
+ 2424               	__c.2367:
+ 2425 0000 5D20 00   		.string	"] "
+ 2426               		.section	.progmem.data.__c.2362,"a"
+ 2429               	__c.2362:
+ 2430 0000 2530 3258 		.string	"%02X "
+ 2430      2000 
+ 2431               		.section	.progmem.data.__c.2359,"a"
+ 2434               	__c.2359:
+ 2435 0000 4D6F 7573 		.string	"Mouse: ["
+ 2435      653A 205B 
+ 2435      00
+ 2436               		.section	.bss.mouseacc.2347,"aw",@nobits
+ 2439               	mouseacc.2347:
+ 2440 0000 00        		.zero	1
+ 2441               		.section	.bss.detect_ms.2349,"aw",@nobits
+ 2444               	detect_ms.2349:
+ 2445 0000 0000      		.zero	2
+ 2446               		.section	.bss.tick_ms.2348,"aw",@nobits
+ 2449               	tick_ms.2348:
+ 2450 0000 0000      		.zero	2
+ 2451               		.section	.progmem.data.__c.2264,"a"
+ 2454               	__c.2264:
+ 2455 0000 2061 6464 		.string	" addr:%d, reg3:%04X\n"
+ 2455      723A 2564 
+ 2455      2C20 7265 
+ 2455      6733 3A25 
+ 2455      3034 580A 
+ 2456               		.section	.progmem.data.__c.2260,"a"
+ 2459               	__c.2260:
+ 2460 0000 0A53 6361 		.string	"\nScan:\n"
+ 2460      6E3A 0A00 
+ 2461               		.section	.progmem.data.__c.2337,"a"
+ 2464               	__c.2337:
+ 2465 0000 6465 7465 		.string	"detect again\n"
+ 2465      6374 2061 
+ 2465      6761 696E 
+ 2465      0A00 
+ 2466               		.section	.data.cmd2.2336,"aw"
+ 2469               	cmd2.2336:
+ 2470 0000 A514 00   		.string	"\245\024"
+ 2471 0003 00        		.string	""
+ 2472 0004 69FF FF27 		.ascii	"i\377\377'"
+ 2473               		.section	.data.cmd1.2335,"aw"
+ 2476               	cmd1.2335:
+ 2477 0000 E78C 00   		.string	"\347\214"
+ 2478 0003 00        		.string	""
+ 2479 0004 00        		.string	""
+ 2480 0005 FFFF 94   		.ascii	"\377\377\224"
+ 2481               		.section	.progmem.data.__c.2333,"a"
+ 2484               	__c.2333:
+ 2485 0000 544D 353A 		.string	"TM5: ext\n"
+ 2485      2065 7874 
+ 2485      0A00 
+ 2486               		.section	.progmem.data.__c.2331,"a"
+ 2489               	__c.2331:
+ 2490 0000 556E 6B6E 		.string	"Unknown\n"
+ 2490      6F77 6E0A 
+ 2490      00
+ 2491               		.section	.progmem.data.__c.2329,"a"
+ 2494               	__c.2329:
+ 2495 0000 544D 353A 		.string	"TM5: default\n"
+ 2495      2064 6566 
+ 2495      6175 6C74 
+ 2495      0A00 
+ 2496               		.section	.progmem.data.__c.2327,"a"
+ 2499               	__c.2327:
+ 2500 0000 5D20 6370 		.string	"] cpi=%d\n"
+ 2500      693D 2564 
+ 2500      0A00 
+ 2501               		.section	.progmem.data.__c.2322,"a"
+ 2504               	__c.2322:
+ 2505 0000 2530 3258 		.string	"%02X "
+ 2505      2000 
+ 2506               		.section	.progmem.data.__c.2319,"a"
+ 2509               	__c.2319:
+ 2510 0000 4578 743A 		.string	"Ext: ["
+ 2510      205B 00
+ 2511               		.section	.progmem.data.__c.2315,"a"
+ 2514               	__c.2315:
+ 2515 0000 436C 6173 		.string	"Classic 200cpi\n"
+ 2515      7369 6320 
+ 2515      3230 3063 
+ 2515      7069 0A00 
+ 2516               		.section	.progmem.data.__c.2313,"a"
+ 2519               	__c.2313:
+ 2520 0000 436C 6173 		.string	"Classic 100cpi\n"
+ 2520      7369 6320 
+ 2520      3130 3063 
+ 2520      7069 0A00 
+ 2521               		.section	.progmem.data.__c.2310,"a"
+ 2524               	__c.2310:
+ 2525 0000 6164 6472 		.string	"addr%d reg3: %02X\n"
+ 2525      2564 2072 
+ 2525      6567 333A 
+ 2525      2025 3032 
+ 2525      580A 00
+ 2526               		.section	.progmem.data.__c.2308,"a"
+ 2529               	__c.2308:
+ 2530 0000 6D6F 7665 		.string	"move fail\n"
+ 2530      2066 6169 
+ 2530      6C0A 00
+ 2531               		.section	.progmem.data.__c.2306,"a"
+ 2534               	__c.2306:
+ 2535 0000 6164 6472 		.string	"addr%d reg3: %02X\n"
+ 2535      2564 2072 
+ 2535      6567 333A 
+ 2535      2025 3032 
+ 2535      580A 00
+ 2536               		.section	.progmem.data.__c.2293,"a"
+ 2539               	__c.2293:
+ 2540 0000 0A4D 6F75 		.string	"\nMouse:\n"
+ 2540      7365 3A0A 
+ 2540      00
+ 2541               		.section	.progmem.data.__c.2291,"a"
+ 2544               	__c.2291:
+ 2545 0000 4D65 6469 		.string	"Media keys\n"
+ 2545      6120 6B65 
+ 2545      7973 0A00 
+ 2546               		.section	.progmem.data.__c.2289,"a"
+ 2549               	__c.2289:
+ 2550 0000 6861 646C 		.string	"hadler: %02X, ISO: %s\n"
+ 2550      6572 3A20 
+ 2550      2530 3258 
+ 2550      2C20 4953 
+ 2550      4F3A 2025 
+ 2551               		.section	.progmem.data.__c.2272,"a"
+ 2554               	__c.2272:
+ 2555 0000 0A4B 6579 		.string	"\nKeyboard:\n"
+ 2555      626F 6172 
+ 2555      643A 0A00 
+ 2556               		.section	.bss.mouse_report,"aw",@nobits
+ 2559               	mouse_report:
+ 2560 0000 0000 0000 		.zero	5
+ 2560      00
+ 2561               		.section	.bss.matrix,"aw",@nobits
+ 2564               	matrix:
+ 2565 0000 0000 0000 		.zero	16
+ 2565      0000 0000 
+ 2565      0000 0000 
+ 2565      0000 0000 
+ 2566               		.section	.data.mouse_cpi,"aw"
+ 2569               	mouse_cpi:
+ 2570 0000 6400      		.word	100
+ 2571               		.section	.bss.is_iso_layout,"aw",@nobits
+ 2574               	is_iso_layout:
+ 2575 0000 00        		.zero	1
+ 2576               		.section	.bss.has_media_keys,"aw",@nobits
+ 2579               	has_media_keys:
+ 2580 0000 00        		.zero	1
+ 2581               		.text
+ 2582               	.Letext0:
+ 2583               		.file 3 "/usr/local/Cellar/avr-gcc/9.1.0/avr/include/stdint.h"
+ 2584               		.file 4 "../../tmk_core/common/matrix.h"
+ 2585               		.file 5 "../../tmk_core/common/debug.h"
+ 2586               		.file 6 "../../tmk_core/common/avr/xprintf.h"
+ 2587               		.file 7 "../../tmk_core/common/report.h"
+ 2588               		.file 8 "../../tmk_core/common/host.h"
+ 2589               		.file 9 "../../tmk_core/common/timer.h"
+ 2590               		.file 10 "../../tmk_core/protocol/adb.h"
+DEFINED SYMBOLS
+                            *ABS*:0000000000000000 matrix.c
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2      *ABS*:000000000000003e __SP_H__
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:3      *ABS*:000000000000003d __SP_L__
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:4      *ABS*:000000000000003f __SREG__
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:5      *ABS*:0000000000000000 __tmp_reg__
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:6      *ABS*:0000000000000001 __zero_reg__
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:12     .text.register_key:0000000000000000 register_key
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2564   .bss.matrix:0000000000000000 matrix
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:77     .text.device_scan:0000000000000000 device_scan
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2459   .progmem.data.__c.2260:0000000000000000 __c.2260
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2454   .progmem.data.__c.2264:0000000000000000 __c.2264
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:207    .text.mouse_init.constprop.0:0000000000000000 mouse_init.constprop.0
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2484   .progmem.data.__c.2333:0000000000000000 __c.2333
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2489   .progmem.data.__c.2331:0000000000000000 __c.2331
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2494   .progmem.data.__c.2329:0000000000000000 __c.2329
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2504   .progmem.data.__c.2322:0000000000000000 __c.2322
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2534   .progmem.data.__c.2306:0000000000000000 __c.2306
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2529   .progmem.data.__c.2308:0000000000000000 __c.2308
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2524   .progmem.data.__c.2310:0000000000000000 __c.2310
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2514   .progmem.data.__c.2315:0000000000000000 __c.2315
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2569   .data.mouse_cpi:0000000000000000 mouse_cpi
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2519   .progmem.data.__c.2313:0000000000000000 __c.2313
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2464   .progmem.data.__c.2337:0000000000000000 __c.2337
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2509   .progmem.data.__c.2319:0000000000000000 __c.2319
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2499   .progmem.data.__c.2327:0000000000000000 __c.2327
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2476   .data.cmd1.2335:0000000000000000 cmd1.2335
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2469   .data.cmd2.2336:0000000000000000 cmd2.2336
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:888    .text.adb_mouse_task:0000000000000000 adb_mouse_task
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2449   .bss.tick_ms.2348:0000000000000000 tick_ms.2348
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2444   .bss.detect_ms.2349:0000000000000000 detect_ms.2349
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2559   .bss.mouse_report:0000000000000000 mouse_report
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2439   .bss.mouseacc.2347:0000000000000000 mouseacc.2347
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2434   .progmem.data.__c.2359:0000000000000000 __c.2359
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2429   .progmem.data.__c.2362:0000000000000000 __c.2362
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2424   .progmem.data.__c.2367:0000000000000000 __c.2367
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2419   .progmem.data.__c.2369:0000000000000000 __c.2369
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:1561   .text.matrix_scan:0000000000000000 matrix_scan
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2414   .data.extra_key.2374:0000000000000000 extra_key.2374
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2409   .bss.tick_ms.2378:0000000000000000 tick_ms.2378
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2579   .bss.has_media_keys:0000000000000000 has_media_keys
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2404   .progmem.data.__c.2386:0000000000000000 __c.2386
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2399   .progmem.data.__c.2394:0000000000000000 __c.2394
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2394   .progmem.data.__c.2396:0000000000000000 __c.2396
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2389   .progmem.data.__c.2398:0000000000000000 __c.2398
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2384   .progmem.data.__c.2400:0000000000000000 __c.2400
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2574   .bss.is_iso_layout:0000000000000000 is_iso_layout
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2006   .text.matrix_get_row:0000000000000000 matrix_get_row
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2033   .text.led_set:0000000000000000 led_set
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2062   .text.matrix_init:0000000000000000 matrix_init
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2554   .progmem.data.__c.2272:0000000000000000 __c.2272
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2549   .progmem.data.__c.2289:0000000000000000 __c.2289
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2544   .progmem.data.__c.2291:0000000000000000 __c.2291
+/var/folders/cl/jr07md_52y31f_27z07pkw7h0000gp/T//ccAO3BrN.s:2539   .progmem.data.__c.2293:0000000000000000 __c.2293
+
+UNDEFINED SYMBOLS
+__xprintf
+adb_host_talk
+debug_config
+adb_host_flush
+adb_host_listen
+adb_host_talk_buf
+adb_host_listen_buf
+timer_elapsed
+timer_read
+host_mouse_send
+adb_host_kbd_recv
+xputs
+adb_host_kbd_led
+adb_host_init
+__tablejump2__
+host_keyboard_leds
+__do_copy_data
+__do_clear_bss
